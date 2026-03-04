@@ -125,7 +125,6 @@ system-file-list.local      Server-specific additions (gitignored, auto-merged i
 lib/
   BackupHelpers.php         Utility functions: output, fs, archive, db, sync, SMTP
   BackupSteps.php           Step functions: backupCustomers, backupSystem, stepSync*, etc.
-reference/                  Previous implementation (read-only reference)
 ```
 
 ## License
