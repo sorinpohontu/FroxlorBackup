@@ -12,8 +12,6 @@
  * @since       2026.03.04
  */
 
-namespace frontline;
-
 // Load config (defaults merged with local overrides)
 $config = array_replace_recursive(
     require __DIR__ . '/config.php',
