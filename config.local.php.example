@@ -1,0 +1,136 @@
+<?php
+
+/**
+ * @package     Froxlor Backup
+ *
+ * @subpackage  Config (local overrides example)
+ *
+ * @author      Sorin Pohontu <sorin@frontline.ro>
+ * @copyright   2026 Frontline softworks <https://www.frontline.ro>
+ * @license     https://opensource.org/licenses/BSD-3-Clause
+ *
+ * @since       2026.03.04
+ */
+
+/*
+ * Local configuration overrides.
+ *
+ * Copy this file to config.local.php and edit as needed.
+ * You only need to specify keys you want to change — defaults are in config.php.
+ * Values are deep-merged with array_replace_recursive().
+ *
+ * All paths are without trailing slash (/).
+ * This file is gitignored to keep secrets out of the repository.
+ */
+
+return [
+
+    // -------------------------------------------------------------------------
+    // Timezone
+    // -------------------------------------------------------------------------
+    // 'timezone' => 'Europe/Bucharest',
+
+    // -------------------------------------------------------------------------
+    // Archive method — applies to all backup sections
+    // 'tar' produces .tar.gz  (always available on Linux)
+    // '7z'  produces .7z      (requires: apt-get install p7zip-full)
+    // -------------------------------------------------------------------------
+    // 'archive_method' => 'tar',
+
+    // -------------------------------------------------------------------------
+    // Local backup retention
+    // 0 = flat layout — overwrite each run, one copy per customer/section
+    // N = dated subdirs (YYYY-MM-DD) — keep N days, auto-delete older ones
+    // -------------------------------------------------------------------------
+    // 'keep_local_days' => 0,
+
+    // -------------------------------------------------------------------------
+    // Clean backup dir before each run (flat layout only)
+    // true  = delete + recreate dir — removes stale files from deleted items
+    // false = keep existing files, overwrite only what is backed up this run
+    // -------------------------------------------------------------------------
+    // 'clean_before_backup' => false,
+
+    // -------------------------------------------------------------------------
+    // Customer backups
+    // -------------------------------------------------------------------------
+    // 'customers' => [
+    //     'enabled'  => true,
+    //     'dir'      => '/var/backups/clients',   // local directory for customer archives
+    //     'vhosts'   => [
+    //         'enabled'            => true,
+    //         'separate_archives'  => true,        // one archive per vhost (false = one per customer)
+    //         'goaccess'           => true,         // also backup goaccess db files
+    //         'exclude_domains'    => [             // domains to skip
+    //             'dev.example.com',
+    //             'staging.example.com',
+    //         ],
+    //     ],
+    //     'databases' => true,    // dump customer databases
+    //     'logs'      => true,    // archive customer access/error logs
+    //     'mails'     => true,    // archive customer mailboxes
+    // ],
+
+    // -------------------------------------------------------------------------
+    // System config backup
+    // -------------------------------------------------------------------------
+    // 'system' => [
+    //     'enabled'   => true,
+    //     'dir'       => '/var/backups/system',
+    //     'file_list' => '/path/to/system-file-list',  // defaults to ./system-file-list
+    // ],
+
+    // -------------------------------------------------------------------------
+    // Control panel (Froxlor) backup
+    // -------------------------------------------------------------------------
+    // 'control_panel' => [
+    //     'enabled' => true,
+    //     'path'    => '/var/www/html/froxlor',
+    // ],
+
+    // -------------------------------------------------------------------------
+    // rsync sync (requires: apt-get install rsync)
+    // -------------------------------------------------------------------------
+    // 'rsync' => [
+    //     'enabled'         => true,
+    //     'ssh_host'        => 'u123456',          // SSH host alias from ~/.ssh/config
+    //     'bin_params'      => '-rav --delete-before',
+    //     // Remote paths — if empty, auto-built as: backups/{hostname}/clients (or /system)
+    //     'path_customers'  => '',
+    //     'path_system'     => '',
+    //     'delete_strategy' => 'before',   // delete old remote backups 'before' or 'after' upload
+    //     'keep_days'       => 7,
+    // ],
+
+    // -------------------------------------------------------------------------
+    // S3 sync via s3cmd (see http://s3tools.org/download)
+    // -------------------------------------------------------------------------
+    // 's3' => [
+    //     'enabled'         => true,
+    //     'bin_params'      => 'sync --delete-removed --quiet --no-guess-mime-type --human-readable-sizes',
+    //     'bucket'          => 's3://my-backup-bucket',
+    //     // Remote paths — if empty, auto-built as: {bucket}/{hostname}/clients (or /system)
+    //     'path_customers'  => '',
+    //     'path_system'     => '',
+    //     'delete_strategy' => 'after',    // delete old remote backups 'before' or 'after' upload
+    //     'keep_days'       => 7,
+    // ],
+
+    // -------------------------------------------------------------------------
+    // Email report via SMTP (no external library required)
+    // -------------------------------------------------------------------------
+    // 'email' => [
+    //     'enabled' => true,
+    //     'smtp'    => [
+    //         'host'       => 'smtp.example.com',
+    //         'port'       => 587,
+    //         'user'       => 'notify@example.com',
+    //         'password'   => 'smtp-password',
+    //         'encryption' => 'tls',   // 'tls', 'ssl', or '' for none
+    //     ],
+    //     'from'    => 'notify@example.com',
+    //     'to'      => 'admin@example.com',
+    //     'subject' => 'Backup Report: {hostname} - {date}',
+    // ],
+
+];

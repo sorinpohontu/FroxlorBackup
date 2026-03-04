@@ -1,0 +1,21 @@
+# Metadata
+.project
+.claude
+.vscode
+
+# OS generated files
+._*
+.DS_Store
+.DS_Store?
+
+# Local config
+config.local.php
+system-file-list.local
+
+# Keep .gitkeep files
+!/**/.gitkeep
+
+# Docs
+docs/**
+AGENTS.md
+CLAUDE.md
