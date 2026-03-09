@@ -9,7 +9,7 @@
  * @copyright   2026 Frontline softworks <https://www.frontline.ro>
  * @license     https://opensource.org/licenses/BSD-3-Clause
  *
- * @since       2026.03.04
+ * @since       2026.03.07
  */
 
 // =============================================================================
@@ -80,18 +80,22 @@ function outputSeparator(): void
 }
 
 /**
- * Output elapsed time since $startTime
+ * Output elapsed time and optional size since $startTime
  *
- * @param float $startTime Result of microtime(true) at step start
+ * @param float   $startTime Result of microtime(true) at step start
+ * @param integer $bytes     Backup size in bytes (0 = omit size from output)
  *
  * @return void
  */
-function outputDone(float $startTime): void
+function outputDone(float $startTime, int $bytes = 0): void
 {
     $elapsed = microtime(true) - $startTime;
     $msg     = 'Done. (' . number_format($elapsed, 2) . ' sec';
     if ($elapsed >= 60) {
         $msg .= ' / ' . number_format($elapsed / 60, 2) . ' min';
+    }
+    if ($bytes > 0) {
+        $msg .= ', ' . formatSize($bytes);
     }
     output($msg . ')');
 }
@@ -201,6 +205,45 @@ function ensureDir(string $path): void
     if (!is_dir($path)) {
         mkdir($path, 0755, true);
     }
+}
+
+/**
+ * Format a byte count as a human-readable string
+ *
+ * @param integer $bytes Byte count
+ *
+ * @return string e.g. "245.3 MB", "1.42 GB"
+ */
+function formatSize(int $bytes): string
+{
+    if ($bytes < 1024) {
+        return $bytes . ' B';
+    }
+    if ($bytes < 1048576) {
+        return number_format($bytes / 1024, 1) . ' KB';
+    }
+    if ($bytes < 1073741824) {
+        return number_format($bytes / 1048576, 1) . ' MB';
+    }
+
+    return number_format($bytes / 1073741824, 2) . ' GB';
+}
+
+/**
+ * Calculate total size of all files in a directory using du
+ *
+ * @param string $path Directory path
+ *
+ * @return integer Total size in bytes
+ */
+function dirSize(string $path): int
+{
+    if (!is_dir($path)) {
+        return 0;
+    }
+    $output = shell_exec('du -sb ' . escapeshellarg($path) . ' 2>/dev/null');
+
+    return $output ? (int) explode("\t", $output)[0] : 0;
 }
 
 /**
@@ -786,6 +829,9 @@ $_summary = [];
 // @var array<string, float> Per-step elapsed times in seconds keyed by step label
 $_stepTimes = [];
 
+// @var array<string, int> Per-step sizes in bytes keyed by step label
+$_stepSizes = [];
+
 /**
  * Reset the summary counters and step timers
  *
@@ -793,9 +839,10 @@ $_stepTimes = [];
  */
 function summaryInit(): void
 {
-    global $_summary, $_stepTimes;
+    global $_summary, $_stepTimes, $_stepSizes;
     $_summary   = [];
     $_stepTimes = [];
+    $_stepSizes = [];
 }
 
 /**
@@ -813,17 +860,19 @@ function summaryAdd(string $key, int $count = 1): void
 }
 
 /**
- * Record elapsed time for a top-level step
+ * Record elapsed time and optional size for a top-level step
  *
- * @param string $label     Step label (e.g. 'Customers', 'System')
- * @param float  $stepStart Result of microtime(true) captured before the step ran
+ * @param string  $label     Step label (e.g. 'Customers', 'System')
+ * @param float   $stepStart Result of microtime(true) captured before the step ran
+ * @param integer $bytes     Backup size in bytes (default 0)
  *
  * @return void
  */
-function summaryTime(string $label, float $stepStart): void
+function summaryTime(string $label, float $stepStart, int $bytes = 0): void
 {
-    global $_stepTimes;
+    global $_stepTimes, $_stepSizes;
     $_stepTimes[$label] = microtime(true) - $stepStart;
+    $_stepSizes[$label] = $bytes;
 }
 
 /**
@@ -843,23 +892,44 @@ function summaryGet(): string
 }
 
 /**
- * Return per-step timing as a human-readable string
+ * Return per-step timing and sizes as a human-readable string
  *
- * @return string e.g. "Customers 4.12s  System 0.84s  Rsync 8.21s"
+ * @return string e.g. "Customers 4.12s 327.4 MB  |  System 0.84s 12.5 MB"
  */
 function summaryTimingGet(): string
 {
-    global $_stepTimes;
+    global $_stepTimes, $_stepSizes;
     $parts = [];
     foreach ($_stepTimes as $label => $elapsed) {
         $entry = $label . ' ' . number_format($elapsed, 2) . 's';
         if ($elapsed >= 60) {
             $entry .= ' (' . number_format($elapsed / 60, 2) . ' min)';
         }
+
+        $size = $_stepSizes[$label] ?? 0;
+        if ($size > 0) {
+            $entry .= ' ' . formatSize($size);
+        }
         $parts[] = $entry;
     }
 
     return implode('  |  ', $parts);
+}
+
+/**
+ * Return the total size across all steps in bytes
+ *
+ * @return integer Total size in bytes
+ */
+function summaryTotalSize(): int
+{
+    global $_stepSizes;
+    $total = 0;
+    foreach ($_stepSizes as $size) {
+        $total += $size;
+    }
+
+    return $total;
 }
 
 // =============================================================================

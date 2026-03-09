@@ -10,6 +10,7 @@ Backs up customer vhosts, databases, mailboxes and logs — plus system config f
 - **System backup** — config files from a customisable file list (Apache, Postfix, Dovecot, SSH, etc.)
 - **Control panel backup** — Froxlor files and database
 - **Remote sync** — rsync (SSH) and/or S3 via `s3cmd`, with configurable retention
+- **Size tracking** — per-customer, per-step, and total backup size in output and summary
 - **Email report** — built-in SMTP mailer, HTML + plain-text, no external libraries
 - **Lock file** — prevents simultaneous runs via `flock()`
 - **Dry-run mode** — simulate a full run without touching any files

@@ -9,7 +9,7 @@
  * @copyright   2026 Frontline softworks <https://www.frontline.ro>
  * @license     https://opensource.org/licenses/BSD-3-Clause
  *
- * @since       2026.03.04
+ * @since       2026.03.07
  */
 
 /**
@@ -24,7 +24,7 @@
  * @param boolean $verbose Show per-file detail
  * @param boolean $dryRun  Simulate without making changes
  *
- * @return void
+ * @return integer Total backup size in bytes
  */
 function backupCustomers(
     array $config,
@@ -35,7 +35,7 @@ function backupCustomers(
     string $today,
     bool $verbose,
     bool $dryRun
-): void {
+): int {
     outputSection('Customers Backup');
 
     $method          = $config['archive_method'];
@@ -54,8 +54,10 @@ function backupCustomers(
     if (empty($customers)) {
         output('No active customers found.');
 
-        return;
+        return 0;
     }
+
+    $totalSize = 0;
 
     foreach ($customers as $customer) {
         $start      = microtime(true);
@@ -231,9 +233,17 @@ function backupCustomers(
             cleanLocalBackups($customerBaseDir, $today, $keepLocalDays);
         }
 
+        $customerSize = $dryRun ? 0 : dirSize($backupDir);
+        $totalSize   += $customerSize;
         summaryAdd('customers');
-        outputDone($start);
+        outputDone($start, $customerSize);
     }
+
+    if ($totalSize > 0) {
+        output('Customers total: ' . formatSize($totalSize));
+    }
+
+    return $totalSize;
 }
 
 /**
@@ -242,9 +252,9 @@ function backupCustomers(
  * @param array   $config Merged config array
  * @param boolean $dryRun Simulate without making changes
  *
- * @return void
+ * @return integer Backup size in bytes
  */
-function backupSystem(array $config, bool $dryRun): void
+function backupSystem(array $config, bool $dryRun): int
 {
     outputSection('System Backup');
 
@@ -254,7 +264,7 @@ function backupSystem(array $config, bool $dryRun): void
     if (empty($fileList) || !file_exists($fileList)) {
         output('Skipping — file list not available.');
 
-        return;
+        return 0;
     }
 
     // Merge with local overrides if present
@@ -281,7 +291,7 @@ function backupSystem(array $config, bool $dryRun): void
         output($action . ': ' . $destDir . '/system-config');
         outputDone($start);
 
-        return;
+        return 0;
     }
 
     if ($cleanBefore && is_dir($destDir)) {
@@ -307,7 +317,10 @@ function backupSystem(array $config, bool $dryRun): void
         }
     }
 
-    outputDone($start);
+    $size = dirSize($destDir);
+    outputDone($start, $size);
+
+    return $size;
 }
 
 /**
@@ -320,7 +333,7 @@ function backupSystem(array $config, bool $dryRun): void
  * @param array   $sqlRoot Froxlor $sql_root credentials array
  * @param boolean $dryRun  Simulate without making changes
  *
- * @return void
+ * @return integer Backup size in bytes
  */
 function backupControlPanel(
     array $config,
@@ -329,7 +342,7 @@ function backupControlPanel(
     array $sql,
     array $sqlRoot,
     bool $dryRun
-): void {
+): int {
     outputSection('Control Panel Backup');
 
     $start         = microtime(true);
@@ -344,7 +357,7 @@ function backupControlPanel(
         output('[dry-run] would dump DB: ' . $sql['db'] . ' -> ' . $destDir . '/control-panel-database');
         outputDone($start);
 
-        return;
+        return 0;
     }
 
     // Clean only if system backup is disabled (otherwise backupSystem already handled it)
@@ -376,7 +389,10 @@ function backupControlPanel(
         'control-panel-database'
     );
 
-    outputDone($start);
+    $size = dirSize($destDir);
+    outputDone($start, $size);
+
+    return $size;
 }
 
 /**

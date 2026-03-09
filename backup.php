@@ -9,7 +9,7 @@
  * @copyright   2026 Frontline softworks <https://www.frontline.ro>
  * @license     https://opensource.org/licenses/BSD-3-Clause
  *
- * @since       2026.03.04
+ * @since       2026.03.07
  */
 
 // Load config (defaults merged with local overrides)
@@ -93,18 +93,18 @@ if ($config['customers']['enabled'] || $config['control_panel']['enabled']) {
 // Run backup steps
 if ($config['customers']['enabled']) {
     $stepStart = microtime(true);
-    backupCustomers($config, $db, $dbRoot, $sql, $sql_root, $today, $verbose, $dryRun);
-    summaryTime('Customers', $stepStart);
+    $stepSize  = backupCustomers($config, $db, $dbRoot, $sql, $sql_root, $today, $verbose, $dryRun);
+    summaryTime('Customers', $stepStart, $stepSize);
 }
 if ($config['system']['enabled']) {
     $stepStart = microtime(true);
-    backupSystem($config, $dryRun);
-    summaryTime('System', $stepStart);
+    $stepSize  = backupSystem($config, $dryRun);
+    summaryTime('System', $stepStart, $stepSize);
 }
 if ($config['control_panel']['enabled']) {
     $stepStart = microtime(true);
-    backupControlPanel($config, $db, $dbRoot, $sql, $sql_root, $dryRun);
-    summaryTime('Control Panel', $stepStart);
+    $stepSize  = backupControlPanel($config, $db, $dbRoot, $sql, $sql_root, $dryRun);
+    summaryTime('Control Panel', $stepStart, $stepSize);
 }
 
 // Run sync steps
@@ -123,9 +123,11 @@ outputSeparator();
 
 // Summary
 $totalElapsed = number_format(microtime(true) - $totalStart, 2);
-$summaryStr  = summaryGet();
-$summaryVerb = outputHasErrors() ? 'Errors:' : 'Success:';
-output($summaryVerb . ' ' . ($summaryStr !== '' ? $summaryStr . ' ' : '') . 'completed in ' . $totalElapsed . 's');
+$totalSize    = summaryTotalSize();
+$summaryStr   = summaryGet();
+$summaryVerb  = outputHasErrors() ? 'Errors:' : 'Success:';
+$sizeStr      = $totalSize > 0 ? ' (' . formatSize($totalSize) . ' total)' : '';
+output($summaryVerb . ' ' . ($summaryStr !== '' ? $summaryStr . ' ' : '') . 'completed in ' . $totalElapsed . 's' . $sizeStr);
 
 outputSeparator();
 

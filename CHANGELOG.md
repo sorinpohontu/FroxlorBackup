@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.1.0] - 2026-03-05
+
+### Added
+- Backup size tracking — each step and customer reports archive size in the "Done" line
+- Per-customer size in output: `Done. (4.12 sec, 245.3 MB)`
+- Customers total size after the customer loop
+- Per-step sizes in the timing breakdown: `Customers 8.35s 327.4 MB  |  System 0.84s 12.5 MB`
+- Total backup size in the summary line: `completed in 17.12s (1.42 GB total)`
+- `formatSize()` and `dirSize()` helper functions
+
+---
+
 ## [1.0.0] - 2026-03-04
 
 ### Added
