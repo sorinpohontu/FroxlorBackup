@@ -9,7 +9,7 @@
  * @copyright   2026 Frontline softworks <https://www.frontline.ro>
  * @license     https://opensource.org/licenses/BSD-3-Clause
  *
- * @since       2026.03.07
+ * @since       2026.03.12
  */
 
 // Load config (defaults merged with local overrides)
@@ -122,12 +122,12 @@ if ($config['s3']['enabled']) {
 outputSeparator();
 
 // Summary
-$totalElapsed = number_format(microtime(true) - $totalStart, 2);
+$totalElapsed = microtime(true) - $totalStart;
 $totalSize    = summaryTotalSize();
 $summaryStr   = summaryGet();
 $summaryVerb  = outputHasErrors() ? 'Errors:' : 'Success:';
 $sizeStr      = $totalSize > 0 ? ' (' . formatSize($totalSize) . ' total)' : '';
-output($summaryVerb . ' ' . ($summaryStr !== '' ? $summaryStr . ' ' : '') . 'completed in ' . $totalElapsed . 's' . $sizeStr);
+output($summaryVerb . ' ' . ($summaryStr !== '' ? $summaryStr . ' ' : '') . 'completed in ' . formatDuration($totalElapsed) . $sizeStr);
 
 outputSeparator();
 

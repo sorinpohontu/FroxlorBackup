@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.2.0] - 2026-03-12
+
+### Added
+- `formatDuration()` helper — formats elapsed time in human-readable format (e.g., "5 min 23s", "1h 15 min 42s")
+- `find7zBinary()` and `require7zBinary()` helpers — intelligent 7-Zip binary detection
+
+### Changed
+- Duration output in progress messages now uses human-readable format via `formatDuration()`
+- 7-Zip support now prefers the official `7zz` binary over the legacy `p7zip` (`7z`), with automatic fallback
+- Updated all install instructions: `apt install 7zip` (Debian 12+) or `apt install p7zip-full` (Debian 11)
+- Simplified sync summary tracking
+
+---
+
 ## [1.1.0] - 2026-03-05
 
 ### Added

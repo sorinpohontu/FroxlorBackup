@@ -9,7 +9,7 @@
  * @copyright   2026 Frontline softworks <https://www.frontline.ro>
  * @license     https://opensource.org/licenses/BSD-3-Clause
  *
- * @since       2026.03.07
+ * @since       2026.03.12
  */
 
 /**
@@ -467,7 +467,7 @@ function stepSyncRsync(array $config, string $today, bool $dryRun): void
         output('Cleanup: removed ' . $deleted . ' old backup(s) (> ' . $cfg['keep_days'] . ' days)');
     }
 
-    summaryAdd('targets', $config['customers']['enabled'] + $config['system']['enabled']);
+    summaryAdd('syncs');
     outputDone($start);
 }
 
@@ -542,6 +542,6 @@ function stepSyncS3(array $config, string $today, bool $dryRun): void
         output('Cleanup: removed ' . $deleted . ' old backup(s) (> ' . $cfg['keep_days'] . ' days)');
     }
 
-    summaryAdd('targets', $config['customers']['enabled'] + $config['system']['enabled']);
+    summaryAdd('syncs');
     outputDone($start);
 }

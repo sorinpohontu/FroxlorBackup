@@ -9,7 +9,7 @@
  * @copyright   2026 Frontline softworks <https://www.frontline.ro>
  * @license     https://opensource.org/licenses/BSD-3-Clause
  *
- * @since       2026.03.04
+ * @since       2026.03.12
  */
 
 /*
@@ -26,7 +26,7 @@ return [
     // -------------------------------------------------------------------------
     // Archive method — applies to all backup sections
     // 'tar' produces .tar.gz  (always available on Linux)
-    // '7z'  produces .7z      (requires: apt-get install p7zip-full)
+    // '7z'  produces .7z      (requires: apt install 7zip or p7zip-full)
     // -------------------------------------------------------------------------
     'archive_method'  => 'tar',
 

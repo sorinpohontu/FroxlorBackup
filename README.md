@@ -22,7 +22,7 @@ Backs up customer vhosts, databases, mailboxes and logs — plus system config f
 - `mysqldump` — if database backup is enabled
 - `rsync` + `ssh` — if rsync sync is enabled
 - `s3cmd` — if S3 sync is enabled ([s3tools.org](http://s3tools.org/download))
-- `7z` — only if `archive_method` is set to `'7z'` (`apt-get install p7zip-full`)
+- `7zz` or `7z` — only if `archive_method` is set to `'7z'` (prefers official `7zz` via `apt install 7zip`, falls back to legacy `7z` via `apt install p7zip-full`)
 
 ## Installation
 
@@ -110,9 +110,14 @@ php backup.php --dry-run --test-email
 Locking is built-in — no need for `flock` wrappers in cron. With email enabled, the script sends its own report and `MAILTO` is not needed.
 
 ```
-# Froxlor Backup — every day at 02:00
-0 2 * * *  root  nice -10 php /root/bin/jobs/backup.php
+# Froxlor Backup — every day at 02:00 (low CPU + I/O priority)
+0 2 * * *  root  nice -n 10 ionice -c2 -n7 php /root/bin/jobs/backup.php
 ```
+
+| Flag | Effect |
+|------|--------|
+| `nice -n 10` | Lower CPU priority (keeps the server responsive) |
+| `ionice -c2 -n7` | Best-effort I/O class, lowest priority (reduces disk contention) |
 
 ## File layout
 

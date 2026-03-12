@@ -9,7 +9,7 @@
  * @copyright   2026 Frontline softworks <https://www.frontline.ro>
  * @license     https://opensource.org/licenses/BSD-3-Clause
  *
- * @since       2026.03.07
+ * @since       2026.03.12
  */
 
 // =============================================================================
@@ -90,10 +90,7 @@ function outputSeparator(): void
 function outputDone(float $startTime, int $bytes = 0): void
 {
     $elapsed = microtime(true) - $startTime;
-    $msg     = 'Done. (' . number_format($elapsed, 2) . ' sec';
-    if ($elapsed >= 60) {
-        $msg .= ' / ' . number_format($elapsed / 60, 2) . ' min';
-    }
+    $msg     = 'Done. (' . formatDuration($elapsed);
     if ($bytes > 0) {
         $msg .= ', ' . formatSize($bytes);
     }
@@ -208,6 +205,31 @@ function ensureDir(string $path): void
 }
 
 /**
+ * Format a duration in seconds as a human-readable string
+ *
+ * @param float $seconds Duration in seconds
+ *
+ * @return string e.g. "23.45s", "5 min 12s", "1h 46 min 49s"
+ */
+function formatDuration(float $seconds): string
+{
+    if ($seconds < 60) {
+        return number_format($seconds, 2) . 's';
+    }
+    if ($seconds < 3600) {
+        $min = floor($seconds / 60);
+        $sec = (int) ($seconds - $min * 60);
+
+        return $min . ' min ' . $sec . 's';
+    }
+    $hours = floor($seconds / 3600);
+    $min   = floor(($seconds - $hours * 3600) / 60);
+    $sec   = (int) ($seconds - $hours * 3600 - $min * 60);
+
+    return $hours . 'h ' . $min . ' min ' . $sec . 's';
+}
+
+/**
  * Format a byte count as a human-readable string
  *
  * @param integer $bytes Byte count
@@ -280,6 +302,42 @@ function requireBinary(string $name): string
     return $path;
 }
 
+/**
+ * Find the 7-Zip binary, preferring the official 7zz over the legacy p7zip 7z
+ *
+ * The official 7-Zip (7zz) supports modern CPU instructions (AES-NI, AVX2)
+ * and better multithreading. Falls back to the legacy p7zip (7z) if 7zz
+ * is not installed.
+ *
+ * @return string Full path, or empty string if neither is found
+ */
+function find7zBinary(): string
+{
+    // Try official 7-Zip first (Debian 12+: apt install 7zip)
+    $path = findBinary('7zz');
+    if ($path !== '') {
+        return $path;
+    }
+
+    // Fall back to legacy p7zip (Debian 11: apt install p7zip-full)
+    return findBinary('7z');
+}
+
+/**
+ * Find the 7-Zip binary and output an error if not found
+ *
+ * @return string Full path, or empty string if not found
+ */
+function require7zBinary(): string
+{
+    $path = find7zBinary();
+    if ($path === '') {
+        outputError('7-Zip not found. Install 7zip (apt install 7zip) or p7zip-full (apt install p7zip-full).');
+    }
+
+    return $path;
+}
+
 // =============================================================================
 // ARCHIVE
 // =============================================================================
@@ -300,7 +358,7 @@ function archiveDirectory(string $source, string $dest, string $method): bool
         return false;
     }
     if ($method === '7z') {
-        $bin = requireBinary('7z');
+        $bin = require7zBinary();
         if ($bin === '') {
             return false;
         }
@@ -337,7 +395,7 @@ function archiveDirectory(string $source, string $dest, string $method): bool
 function archiveFiles(array $files, string $dest, string $method): bool
 {
     if ($method === '7z') {
-        $bin = requireBinary('7z');
+        $bin = require7zBinary();
         if ($bin === '') {
             return false;
         }
@@ -384,7 +442,7 @@ function archiveGlob(string $pattern, string $baseDir, string $dest, string $met
         return false;
     }
     if ($method === '7z') {
-        $bin = requireBinary('7z');
+        $bin = require7zBinary();
         if ($bin === '') {
             return false;
         }
@@ -417,7 +475,7 @@ function archiveGlob(string $pattern, string $baseDir, string $dest, string $met
 function archiveFileList(string $fileListPath, string $dest, string $method): bool
 {
     if ($method === '7z') {
-        $bin = requireBinary('7z');
+        $bin = require7zBinary();
         if ($bin === '') {
             return false;
         }
@@ -901,10 +959,7 @@ function summaryTimingGet(): string
     global $_stepTimes, $_stepSizes;
     $parts = [];
     foreach ($_stepTimes as $label => $elapsed) {
-        $entry = $label . ' ' . number_format($elapsed, 2) . 's';
-        if ($elapsed >= 60) {
-            $entry .= ' (' . number_format($elapsed / 60, 2) . ' min)';
-        }
+        $entry = $label . ' ' . formatDuration($elapsed);
 
         $size = $_stepSizes[$label] ?? 0;
         if ($size > 0) {
@@ -973,8 +1028,8 @@ function validateConfig(array $config): bool
 
     // Required binaries
     $method = $config['archive_method'];
-    if ($method === '7z' && findBinary('7z') === '') {
-        outputError('7z not found. Install p7zip-full (apt-get install p7zip-full)');
+    if ($method === '7z' && find7zBinary() === '') {
+        outputError('7-Zip not found. Install 7zip (apt install 7zip) or p7zip-full (apt install p7zip-full)');
         $valid = false;
     }
 
