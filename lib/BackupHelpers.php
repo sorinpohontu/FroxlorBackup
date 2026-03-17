@@ -9,7 +9,7 @@
  * @copyright   2026 Frontline softworks <https://www.frontline.ro>
  * @license     https://opensource.org/licenses/BSD-3-Clause
  *
- * @since       2026.03.12
+ * @since       2026.03.17
  */
 
 // =============================================================================
@@ -214,7 +214,7 @@ function ensureDir(string $path): void
 function formatDuration(float $seconds): string
 {
     if ($seconds < 60) {
-        return number_format($seconds, 2) . 's';
+        return round($seconds, 2) . 's';
     }
     if ($seconds < 3600) {
         $min = floor($seconds / 60);
