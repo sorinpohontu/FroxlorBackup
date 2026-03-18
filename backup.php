@@ -9,7 +9,7 @@
  * @copyright   2026 Frontline softworks <https://www.frontline.ro>
  * @license     https://opensource.org/licenses/BSD-3-Clause
  *
- * @since       2026.03.12
+ * @since       2026.03.18
  */
 
 // Load config (defaults merged with local overrides)
@@ -126,8 +126,11 @@ $totalElapsed = microtime(true) - $totalStart;
 $totalSize    = summaryTotalSize();
 $summaryStr   = summaryGet();
 $summaryVerb  = outputHasErrors() ? 'Errors:' : 'Success:';
-$sizeStr      = $totalSize > 0 ? ' (' . formatSize($totalSize) . ' total)' : '';
-output($summaryVerb . ' ' . ($summaryStr !== '' ? $summaryStr . ' ' : '') . 'completed in ' . formatDuration($totalElapsed) . $sizeStr);
+$sizeStr      = $totalSize > 0 ? ' (' . formatSize($totalSize) . ')' : '';
+if ($summaryStr !== '') {
+    output($summaryVerb . ' ' . $summaryStr);
+}
+output('Completed in ' . formatDuration($totalElapsed) . $sizeStr);
 
 outputSeparator();
 

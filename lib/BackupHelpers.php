@@ -9,7 +9,7 @@
  * @copyright   2026 Frontline softworks <https://www.frontline.ro>
  * @license     https://opensource.org/licenses/BSD-3-Clause
  *
- * @since       2026.03.17
+ * @since       2026.03.18
  */
 
 // =============================================================================
@@ -946,29 +946,34 @@ function summaryGet(): string
         $parts[] = $count . ' ' . $key;
     }
 
-    return implode(', ', $parts);
+    return implode(' / ', $parts);
 }
 
 /**
- * Return per-step timing and sizes as a human-readable string
+ * Return per-step timing and sizes as a multi-line human-readable string
  *
- * @return string e.g. "Customers 4.12s 327.4 MB  |  System 0.84s 12.5 MB"
+ * @return string One line per step, e.g. "  Customers   1h 5 min 29s   19.07 GB"
  */
 function summaryTimingGet(): string
 {
     global $_stepTimes, $_stepSizes;
-    $parts = [];
+    if (empty($_stepTimes)) {
+        return '';
+    }
+
+    $maxLen = max(array_map('strlen', array_keys($_stepTimes)));
+    $lines  = [];
     foreach ($_stepTimes as $label => $elapsed) {
-        $entry = $label . ' ' . formatDuration($elapsed);
+        $entry = '  ' . str_pad($label, $maxLen) . '   ' . formatDuration($elapsed);
 
         $size = $_stepSizes[$label] ?? 0;
         if ($size > 0) {
-            $entry .= ' ' . formatSize($size);
+            $entry .= '   ' . formatSize($size);
         }
-        $parts[] = $entry;
+        $lines[] = $entry;
     }
 
-    return implode('  |  ', $parts);
+    return implode(PHP_EOL, $lines);
 }
 
 /**
