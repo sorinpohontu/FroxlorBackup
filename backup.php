@@ -9,7 +9,7 @@
  * @copyright   2026 Frontline softworks <https://www.frontline.ro>
  * @license     https://opensource.org/licenses/BSD-3-Clause
  *
- * @since       2026.03.18
+ * @since       2026.03.19
  */
 
 // Load config (defaults merged with local overrides)
@@ -135,7 +135,7 @@ output('Completed in ' . formatDuration($totalElapsed) . $sizeStr);
 outputSeparator();
 
 if (summaryTimingGet() !== '') {
-    output(summaryTimingGet());
+    outputLines(summaryTimingGet());
 }
 
 outputSeparator();

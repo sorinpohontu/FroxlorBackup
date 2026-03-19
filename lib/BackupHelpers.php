@@ -9,7 +9,7 @@
  * @copyright   2026 Frontline softworks <https://www.frontline.ro>
  * @license     https://opensource.org/licenses/BSD-3-Clause
  *
- * @since       2026.03.18
+ * @since       2026.03.19
  */
 
 // =============================================================================
@@ -47,6 +47,29 @@ function output(string $msg): void
     $line = '[' . date('H:i:s') . '] ' . $msg . PHP_EOL;
     echo $line;
     $_outputBuffer .= $line;
+}
+
+/**
+ * Write each line of a multi-line string with its own timestamp
+ *
+ * @param string $msg Multi-line message to output
+ *
+ * @return void
+ */
+function outputLines(string $msg): void
+{
+    $lines = preg_split('/\r\n|\r|\n/', $msg);
+    if ($lines === false) {
+        return;
+    }
+
+    foreach ($lines as $line) {
+        if ($line === '') {
+            continue;
+        }
+
+        output($line);
+    }
 }
 
 /**
@@ -952,7 +975,7 @@ function summaryGet(): string
 /**
  * Return per-step timing and sizes as a multi-line human-readable string
  *
- * @return string One line per step, e.g. "  Customers   1h 5 min 29s   19.07 GB"
+ * @return string One line per step, e.g. "Customers   1h 5 min 29s   19.07 GB"
  */
 function summaryTimingGet(): string
 {
@@ -961,16 +984,34 @@ function summaryTimingGet(): string
         return '';
     }
 
-    $maxLen = max(array_map('strlen', array_keys($_stepTimes)));
-    $lines  = [];
+    $durationStrings = [];
+    $sizeStrings     = [];
+    $maxLabelLen     = 0;
+    $maxDurationLen  = 0;
+    $maxSizeLen      = 0;
+
     foreach ($_stepTimes as $label => $elapsed) {
-        $entry = '  ' . str_pad($label, $maxLen) . '   ' . formatDuration($elapsed);
+        $durationStrings[$label] = formatDuration($elapsed);
+        $sizeStrings[$label]     = '';
+        $maxLabelLen             = max($maxLabelLen, strlen($label));
+        $maxDurationLen          = max($maxDurationLen, strlen($durationStrings[$label]));
 
         $size = $_stepSizes[$label] ?? 0;
         if ($size > 0) {
-            $entry .= '   ' . formatSize($size);
+            $sizeStrings[$label] = formatSize($size);
+            $maxSizeLen          = max($maxSizeLen, strlen($sizeStrings[$label]));
         }
-        $lines[] = $entry;
+    }
+
+    $lines = [];
+    foreach ($_stepTimes as $label => $elapsed) {
+        $entry = str_pad($label, $maxLabelLen) . '   ' . str_pad($durationStrings[$label], $maxDurationLen);
+
+        if ($sizeStrings[$label] !== '') {
+            $entry .= '   ' . str_pad($sizeStrings[$label], $maxSizeLen, ' ', STR_PAD_LEFT);
+        }
+
+        $lines[] = rtrim($entry);
     }
 
     return implode(PHP_EOL, $lines);
@@ -1118,7 +1159,7 @@ function wrapEmailHtml(string $plainBody, bool $hasErrors): string
         // Detect section header (line between two dashes-lines): "  SECTION NAME"
         if (preg_match('/^\s{2}[A-Z][A-Z\s:\d]+$/', $line)) {
             $rows .= '<tr><td style="padding:14px 20px 6px;font-family:monospace,monospace;'
-                . 'font-size:11px;font-weight:bold;color:#555;letter-spacing:1px;'
+                . 'font-size:11px;font-weight:bold;color:#555;letter-spacing:1px;white-space:pre-wrap;'
                 . 'border-top:2px solid #e0e0e0;text-transform:uppercase;">'
                 . trim($line) . '</td></tr>';
             continue;
@@ -1127,14 +1168,14 @@ function wrapEmailHtml(string $plainBody, bool $hasErrors): string
         // Detect error lines
         if (strpos($line, 'ERROR:') !== false) {
             $rows .= '<tr><td style="padding:3px 20px;font-family:monospace,monospace;'
-                . 'font-size:12px;color:#c0392b;background:#fff5f5;">' . $line . '</td></tr>';
+                . 'font-size:12px;color:#c0392b;background:#fff5f5;white-space:pre-wrap;">' . $line . '</td></tr>';
             continue;
         }
 
         // Detect summary line
         if (strpos($line, '] Success:') !== false || strpos($line, '] Errors:') !== false) {
             $rows .= '<tr><td style="padding:6px 20px;font-family:monospace,monospace;'
-                . 'font-size:12px;font-weight:bold;color:#2c3e50;border-top:1px solid #e0e0e0;">'
+                . 'font-size:12px;font-weight:bold;color:#2c3e50;border-top:1px solid #e0e0e0;white-space:pre-wrap;">'
                 . $line . '</td></tr>';
             continue;
         }
@@ -1147,7 +1188,7 @@ function wrapEmailHtml(string $plainBody, bool $hasErrors): string
 
         // Normal lines
         $rows .= '<tr><td style="padding:3px 20px;font-family:monospace,monospace;'
-            . 'font-size:12px;color:#333;">' . $line . '</td></tr>';
+            . 'font-size:12px;color:#333;white-space:pre-wrap;">' . $line . '</td></tr>';
     }
 
     // Extract summary line for the preheader (shown in notification previews)
