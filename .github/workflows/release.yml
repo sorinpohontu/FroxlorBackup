@@ -108,7 +108,8 @@ jobs:
           php -l lib/BackupSteps.php
           php -l tests/ReviewSmoke.php
           php backup.php --help > /dev/null
-          runuser -u nobody -- php tests/ReviewSmoke.php
+          install -d -m 0700 -o nobody -g nogroup /run/froxlor-review
+          runuser -u nobody -- env TMPDIR=/run/froxlor-review php tests/ReviewSmoke.php
 
   publish:
     needs: [verify, debian-check]
