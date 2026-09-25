@@ -193,6 +193,8 @@
         <exclude-pattern>/web/(index|index-test).php$</exclude-pattern>
         <!-- Procedural helper files intentionally mix globals and function definitions -->
         <exclude-pattern>*/lib/Backup*.php$</exclude-pattern>
+        <!-- Standalone fixture script intentionally declares assertions and executes them -->
+        <exclude-pattern>*/tests/ReviewSmoke.php$</exclude-pattern>
     </rule>
 
     <exclude-pattern>*/i18n/data/*</exclude-pattern>

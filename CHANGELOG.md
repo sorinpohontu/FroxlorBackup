@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2.0.0] - 2026-09-24
+
+### Added
+- `--help` and side-effect-free `--check-install` commands
+- Per-vhost file exclusions for tar and 7z archives
+- Operating-system timezone detection with an explicit configuration override
+- Dependency-free smoke checks for retention, replacement, failure, dry-run, and SMTP behavior
+
+### Changed
+- Load Froxlor PHP settings as their owner through an isolated `runuser` process, then validate the returned data
+- Validate trusted inputs, backup boundaries, remote destinations, configuration, and enabled tools before backup work
+- Publish flat backup replacements and remote retention only after the affected backup or upload succeeds
+- Default remote retention to `after` and list restricted rsync destinations without remote `find` or `ls` commands
+- Preserve failed database inputs in a private recovery directory and provide actionable failure messages
+- Keep ordinary dry runs read-only and require `--dry-run --test-email` for test reports
+- Use 7z as the default archive method
+
+### Fixed
+- S3 retention date extraction and rsync retention entry-type validation
+- Control-panel-only sync and shared system/control-panel completion accounting
+- SMTP multiline reply handling, response validation, and certificate checking
+- Archive failure handling, output permissions, cleanup boundaries, and success-only counters
+
+### Removed
+- User-supplied rsync and S3 `bin_params`; transport commands now use validated built-in arguments
+
+---
+
 ## [1.2.0] - 2026-03-12
 
 ### Added

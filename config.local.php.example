@@ -9,7 +9,7 @@
  * @copyright   2026 Frontline softworks <https://www.frontline.ro>
  * @license     https://opensource.org/licenses/BSD-3-Clause
  *
- * @since       2026.03.04
+ * @since       2026.09.24
  */
 
 /*
@@ -26,13 +26,13 @@
 return [
 
     // -------------------------------------------------------------------------
-    // Timezone
+    // Timezone — empty uses the operating system or CLI PHP timezone
     // -------------------------------------------------------------------------
-    // 'timezone' => 'Europe/Bucharest',
+    // 'timezone' => 'Europe/Bucharest', // Optional explicit IANA override
 
     // -------------------------------------------------------------------------
     // Archive method — applies to all backup sections
-    // 'tar' produces .tar.gz  (always available on Linux)
+    // 'tar' produces .tar.gz  (requires the tar executable)
     // '7z'  produces .7z      (requires: apt install 7zip or p7zip-full)
     // -------------------------------------------------------------------------
     // 'archive_method' => 'tar',
@@ -46,7 +46,7 @@ return [
 
     // -------------------------------------------------------------------------
     // Clean backup dir before each run (flat layout only)
-    // true  = delete + recreate dir — removes stale files from deleted items
+    // true  = prepare a replacement dir — removes stale files after successful backup
     // false = keep existing files, overwrite only what is backed up this run
     // -------------------------------------------------------------------------
     // 'clean_before_backup' => false,
@@ -64,6 +64,10 @@ return [
     //         'exclude_domains'    => [             // domains to skip
     //             'dev.example.com',
     //             'staging.example.com',
+    //         ],
+    //         'exclude_files'      => [             // paths relative to every vhost document root
+    //             'wp-content/cache/all',
+    //             'system/storage/cache',
     //         ],
     //     ],
     //     'databases' => true,    // dump customer databases
@@ -94,11 +98,10 @@ return [
     // 'rsync' => [
     //     'enabled'         => true,
     //     'ssh_host'        => 'u123456',          // SSH host alias from ~/.ssh/config
-    //     'bin_params'      => '-rav --delete-before',
     //     // Remote paths — if empty, auto-built as: backups/{hostname}/clients (or /system)
     //     'path_customers'  => '',
     //     'path_system'     => '',
-    //     'delete_strategy' => 'before',   // delete old remote backups 'before' or 'after' upload
+    //     'delete_strategy' => 'after',    // delete old remote backups 'before' or 'after' upload
     //     'keep_days'       => 7,
     // ],
 
@@ -107,7 +110,6 @@ return [
     // -------------------------------------------------------------------------
     // 's3' => [
     //     'enabled'         => true,
-    //     'bin_params'      => 'sync --delete-removed --quiet --no-guess-mime-type --human-readable-sizes',
     //     'bucket'          => 's3://my-backup-bucket',
     //     // Remote paths — if empty, auto-built as: {bucket}/{hostname}/clients (or /system)
     //     'path_customers'  => '',

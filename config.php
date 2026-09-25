@@ -9,7 +9,7 @@
  * @copyright   2026 Frontline softworks <https://www.frontline.ro>
  * @license     https://opensource.org/licenses/BSD-3-Clause
  *
- * @since       2026.03.12
+ * @since       2026.09.24
  */
 
 /*
@@ -19,16 +19,16 @@
 
 return [
     // -------------------------------------------------------------------------
-    // Timezone
+    // Timezone — empty uses the operating system or CLI PHP timezone
     // -------------------------------------------------------------------------
-    'timezone' => 'Europe/Bucharest',
+    'timezone' => '',
 
     // -------------------------------------------------------------------------
     // Archive method — applies to all backup sections
     // 'tar' produces .tar.gz  (always available on Linux)
     // '7z'  produces .7z      (requires: apt install 7zip or p7zip-full)
     // -------------------------------------------------------------------------
-    'archive_method'  => 'tar',
+    'archive_method'  => '7z',
 
     // -------------------------------------------------------------------------
     // Local backup retention
@@ -39,7 +39,7 @@ return [
 
     // -------------------------------------------------------------------------
     // Clean backup dir before each run (flat layout only)
-    // true  = delete + recreate dir — removes stale files from deleted items
+    // true  = prepare a replacement dir — removes stale files after successful backup
     // false = keep existing files, overwrite only what is backed up this run
     // -------------------------------------------------------------------------
     'clean_before_backup' => false,
@@ -59,6 +59,7 @@ return [
                 // 'dev.example.com',
                 // 'staging.example.com',
             ],
+            'exclude_files'      => [],
         ],
         'databases' => true,
         'logs'      => true,
@@ -88,11 +89,10 @@ return [
     'rsync' => [
         'enabled'         => false,
         'ssh_host'        => '',
-        'bin_params'      => '-rav --delete-before',
         // Remote paths — auto-built from hostname if empty: backups/{hostname}/clients
         'path_customers'  => '',
         'path_system'     => '',
-        'delete_strategy' => 'before',  // 'before' or 'after'
+        'delete_strategy' => 'after',  // 'before' or 'after'
         'keep_days'       => 7,
     ],
 
@@ -101,12 +101,11 @@ return [
     // -------------------------------------------------------------------------
     's3' => [
         'enabled'         => false,
-        'bin_params'      => 'sync --delete-removed --quiet --no-guess-mime-type --human-readable-sizes',
         'bucket'          => '',        // e.g. 's3://my-bucket'
         // Remote paths — auto-built from hostname if empty
         'path_customers'  => '',
         'path_system'     => '',
-        'delete_strategy' => 'before',  // 'before' or 'after'
+        'delete_strategy' => 'after',  // 'before' or 'after'
         'keep_days'       => 7,
     ],
 

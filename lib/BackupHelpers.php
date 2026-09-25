@@ -9,7 +9,7 @@
  * @copyright   2026 Frontline softworks <https://www.frontline.ro>
  * @license     https://opensource.org/licenses/BSD-3-Clause
  *
- * @since       2026.03.19
+ * @since       2026.09.25
  */
 
 // =============================================================================
@@ -121,17 +121,21 @@ function outputDone(float $startTime, int $bytes = 0): void
 }
 
 /**
- * Output an error message and increment the error counter
+ * Output an error and an optional next step; count it once
  *
- * @param string $msg Error message
+ * @param string $msg  Error message
+ * @param string $hint Suggested next step
  *
  * @return void
  */
-function outputError(string $msg): void
+function outputError(string $msg, string $hint = ''): void
 {
     global $_errorCount;
     $_errorCount++;
     output('ERROR: ' . $msg);
+    if ($hint !== '') {
+        output('  Next step: ' . $hint);
+    }
 }
 
 /**
@@ -183,30 +187,84 @@ function outputHasErrors(): bool
  */
 function acquireLock(string $lockFile)
 {
-    $fp = fopen($lockFile, 'w');
+    if (is_link($lockFile)) {
+        outputError('Lock file must not be a symlink: ' . $lockFile);
+        return false;
+    }
+
+    $fp = fopen($lockFile, 'c');
     if (!$fp || !flock($fp, LOCK_EX | LOCK_NB)) {
         return false;
     }
+    ftruncate($fp, 0);
     fwrite($fp, (string) getmypid());
     fflush($fp);
     return $fp;
 }
 
 /**
- * Release the file lock and delete the lock file
+ * Release the file lock
  *
- * @param resource $fp       File pointer returned by acquireLock()
- * @param string   $lockFile Path to lock file
+ * @param resource $fp File pointer returned by acquireLock()
  *
  * @return void
  */
-function releaseLock($fp, string $lockFile): void
+function releaseLock($fp): void
 {
     flock($fp, LOCK_UN);
     fclose($fp);
-    if (file_exists($lockFile)) {
-        unlink($lockFile);
+}
+
+/**
+ * Ensure a secure runtime directory
+ *
+ * @param string  $path   Runtime directory
+ * @param boolean $create Whether a missing directory may be created
+ *
+ * @return boolean
+ */
+function ensureSecureRuntimeDirectory(string $path, bool $create = true): bool
+{
+    if (is_link($path)) {
+        outputError(
+            'Backup runtime directory is a symlink: ' . $path,
+            'Use a real directory for the backup installation or recovery workspace.'
+        );
+        return false;
     }
+    if (!is_dir($path)) {
+        if (!$create) {
+            outputError(
+                'Backup runtime directory does not exist: ' . $path,
+                'Check the installed backup path and restore the missing directory.'
+            );
+            return false;
+        }
+        if (!mkdir($path, 0700, true)) {
+            outputError(
+                'Cannot create backup runtime directory: ' . $path,
+                'Check the parent directory permissions and available disk space.'
+            );
+            return false;
+        }
+    }
+    clearstatcache(true, $path);
+    if (!is_dir($path) || (fileperms($path) & 0077) !== 0) {
+        outputError(
+            'Backup runtime directory allows group or other access: ' . $path,
+            'Restrict this backup directory to mode 0700.'
+        );
+        return false;
+    }
+    if (isRootProcess() && fileowner($path) !== 0) {
+        outputError(
+            'Backup runtime directory must be root-owned when running as root: ' . $path,
+            'Check ownership of this backup directory.'
+        );
+        return false;
+    }
+
+    return true;
 }
 
 // =============================================================================
@@ -222,9 +280,237 @@ function releaseLock($fp, string $lockFile): void
  */
 function ensureDir(string $path): void
 {
-    if (!is_dir($path)) {
-        mkdir($path, 0755, true);
+    if ($path === '' || $path[0] !== '/') {
+        throw new \RuntimeException('Backup directory must be absolute: ' . $path);
     }
+    $current = '';
+    foreach (explode('/', trim($path, '/')) as $component) {
+        $current .= '/' . $component;
+        if (is_link($current) || (is_dir($current) && (fileperms($current) & 0022) !== 0)) {
+            throw new \RuntimeException('Unsafe backup directory component: ' . $current);
+        }
+    }
+    if (!is_dir($path) && !@mkdir($path, 0755, true)) {
+        throw new \RuntimeException('Cannot create safe backup directory: ' . $path);
+    }
+    if (!is_dir($path) || (fileperms($path) & 0022) !== 0) {
+        throw new \RuntimeException('Backup directory is unavailable: ' . $path);
+    }
+}
+
+/**
+ * Check a database-derived single path component
+ *
+ * @param string $value Component to check
+ *
+ * @return boolean
+ */
+function isSafePathComponent(string $value): bool
+{
+    return $value !== '' && $value !== '.' && $value !== '..'
+        && preg_match('/^[A-Za-z0-9_.@-]+$/D', $value) === 1;
+}
+
+/**
+ * Reject dangerous backup roots before creation or deletion
+ *
+ * @param string $path Backup root
+ *
+ * @return boolean
+ */
+function isSafeBackupRoot(string $path): bool
+{
+    if (
+        $path === '' || $path[0] !== '/' || $path === '/'
+        || preg_match('/[\x00-\x1f\x7f]/', $path) === 1
+    ) {
+        return false;
+    }
+    $parts = explode('/', trim($path, '/'));
+    if (count($parts) < 3) {
+        return false;
+    }
+    foreach ($parts as $part) {
+        if ($part === '' || $part === '.' || $part === '..') {
+            return false;
+        }
+    }
+    $current = '';
+    foreach ($parts as $part) {
+        $current .= '/' . $part;
+        if (is_link($current)) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+/**
+ * Check that a backup destination is outside a source tree
+ *
+ * @param string $destination Backup destination
+ * @param string $source      Source directory
+ *
+ * @return boolean
+ */
+function isDestinationOutsideSource(string $destination, string $source): bool
+{
+    $sourcePath = realpath($source);
+    return $sourcePath !== false
+        && strpos(rtrim($destination, '/') . '/', rtrim($sourcePath, '/') . '/') !== 0;
+}
+
+/**
+ * Check a remote path made from fixed safe components
+ *
+ * @param string $path Remote base path
+ *
+ * @return boolean
+ */
+function isSafeRemotePath(string $path): bool
+{
+    if (
+        $path === '' || trim($path, '/') === '' || substr($path, -1) === '/'
+        || $path[0] === '-' || preg_match('~^[A-Za-z0-9_./-]+$~D', $path) !== 1
+    ) {
+        return false;
+    }
+    foreach (explode('/', $path) as $component) {
+        if ($component === '.' || $component === '..') {
+            return false;
+        }
+    }
+
+    return strpos($path, '//') === false;
+}
+
+/**
+ * Check an S3 base URL
+ *
+ * @param string $path S3 URL
+ *
+ * @return boolean
+ */
+function isSafeS3Path(string $path): bool
+{
+    return preg_match('~^s3://[A-Za-z0-9][A-Za-z0-9.-]*(?:/[A-Za-z0-9_./-]+)?$~D', $path) === 1
+        && isSafeRemotePath(substr($path, 5));
+}
+
+/**
+ * Check the first existing ancestor of a destination
+ *
+ * @param string $path Destination path
+ *
+ * @return boolean
+ */
+function isCreatableBackupPath(string $path): bool
+{
+    if (!isSafeBackupRoot($path)) {
+        return false;
+    }
+    $current = '';
+    foreach (explode('/', trim($path, '/')) as $component) {
+        $current .= '/' . $component;
+        if (is_dir($current) && (fileperms($current) & 0022) !== 0) {
+            return false;
+        }
+    }
+    while (!file_exists($path)) {
+        $parent = dirname($path);
+        if ($parent === $path) {
+            return false;
+        }
+        $path = $parent;
+    }
+
+    return is_dir($path) && is_writable($path) && !is_link($path)
+        && (fileperms($path) & 0022) === 0;
+}
+
+/**
+ * Remove a previously checked backup directory
+ *
+ * @param string $path Directory to remove
+ *
+ * @return boolean
+ */
+function removeBackupDirectory(string $path): bool
+{
+    $parent = dirname($path);
+    if (
+        !isSafeBackupRoot($path) || is_link($path) || !is_dir($parent)
+        || !is_writable($parent) || (fileperms($parent) & 0022) !== 0
+    ) {
+        outputError('Unsafe backup directory deletion: ' . $path);
+        return false;
+    }
+
+    return runCommand('rm -rf -- ' . escapeshellarg($path), 'Backup directory deletion');
+}
+
+/**
+ * Prepare an isolated replacement of a flat backup directory
+ *
+ * @param string $final Final directory
+ *
+ * @return string Temporary directory, or empty on failure
+ */
+function prepareBackupReplacement(string $final): string
+{
+    if (!isSafeBackupRoot($final)) {
+        outputError('Unsafe backup destination: ' . $final);
+        return '';
+    }
+    ensureDir(dirname($final));
+    $stage = dirname($final) . '/.' . basename($final) . '.new-' . bin2hex(random_bytes(8));
+    if (!mkdir($stage, 0700)) {
+        outputError('Cannot prepare backup replacement: ' . $stage);
+        return '';
+    }
+
+    return $stage;
+}
+
+/**
+ * Publish a complete replacement and retain the old copy on failure
+ *
+ * @param string $stage Prepared directory
+ * @param string $final Final directory
+ *
+ * @return boolean
+ */
+function publishBackupReplacement(string $stage, string $final): bool
+{
+    if (!isSafeBackupRoot($stage) || !isSafeBackupRoot($final) || dirname($stage) !== dirname($final)) {
+        outputError('Unsafe backup replacement');
+        return false;
+    }
+    $previous = '';
+    if (file_exists($final) || is_link($final)) {
+        if (is_link($final) || !is_dir($final)) {
+            outputError('Existing backup destination is unsafe: ' . $final);
+            return false;
+        }
+        $previous = dirname($final) . '/.' . basename($final) . '.previous-' . bin2hex(random_bytes(8));
+        if (!rename($final, $previous)) {
+            outputError('Cannot preserve previous backup: ' . $final);
+            return false;
+        }
+    }
+    if (!rename($stage, $final)) {
+        if ($previous !== '' && !rename($previous, $final)) {
+            outputError('Cannot restore previous backup: ' . $previous);
+        }
+        outputError('Cannot publish backup: ' . $final);
+        return false;
+    }
+    if ($previous !== '' && !removeBackupDirectory($previous)) {
+        return false;
+    }
+
+    return true;
 }
 
 /**
@@ -279,20 +565,25 @@ function formatSize(int $bytes): string
  *
  * @param string $path Directory path
  *
- * @return integer Total size in bytes
+ * @return integer|null Total size in bytes, or null on failure
  */
-function dirSize(string $path): int
+function dirSize(string $path): ?int
 {
     if (!is_dir($path)) {
-        return 0;
+        outputError('Cannot measure missing backup directory: ' . $path);
+        return null;
     }
-    $output = shell_exec('du -sb ' . escapeshellarg($path) . ' 2>/dev/null');
+    $lines = runCommandOutput('du -sb ' . escapeshellarg($path), 'Backup size', true);
+    if ($lines === null || !isset($lines[0]) || preg_match('/^(\d+)\t/', $lines[0], $matches) !== 1) {
+        outputError('Cannot read backup size: ' . $path);
+        return null;
+    }
 
-    return $output ? (int) explode("\t", $output)[0] : 0;
+    return (int) $matches[1];
 }
 
 /**
- * Find a binary using `which`, with result caching
+ * Find an executable in PATH, with result caching
  *
  * @param string $name Binary name (e.g. 'tar', '7z', 'rsync')
  *
@@ -302,10 +593,52 @@ function findBinary(string $name): string
 {
     static $cache = [];
     if (!isset($cache[$name])) {
-        $cache[$name] = trim(shell_exec('which ' . escapeshellarg($name)) ?? '');
+        $cache[$name] = '';
+        if (preg_match('/^[A-Za-z0-9._+-]+$/D', $name) !== 1) {
+            return '';
+        }
+        $path = getenv('PATH');
+        if (!is_string($path) || $path === '') {
+            $path = '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin';
+        }
+        foreach (explode(PATH_SEPARATOR, $path) as $directory) {
+            if ($directory === '') {
+                continue;
+            }
+            $candidate = rtrim($directory, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . $name;
+            if (is_file($candidate) && is_executable($candidate)) {
+                $cache[$name] = $candidate;
+                break;
+            }
+        }
     }
 
     return $cache[$name];
+}
+
+/**
+ * Check whether a PHP function exists and is not disabled
+ *
+ * @param string $name Function name
+ *
+ * @return boolean
+ */
+function isPhpFunctionAvailable(string $name): bool
+{
+    if (!function_exists($name)) {
+        return false;
+    }
+    $disabled = ini_get('disable_functions');
+    if (!is_string($disabled) || trim($disabled) === '') {
+        return true;
+    }
+    foreach (explode(',', $disabled) as $function) {
+        if (strcasecmp(trim($function), $name) === 0) {
+            return false;
+        }
+    }
+
+    return true;
 }
 
 /**
@@ -368,46 +701,81 @@ function require7zBinary(): string
 /**
  * Archive a directory using tar or 7z
  *
- * @param string $source Full path to source directory
- * @param string $dest   Destination path without extension
- * @param string $method Archive method: 'tar' or '7z'
+ * @param string   $source       Full path to source directory
+ * @param string   $dest         Destination path without extension
+ * @param string   $method       Archive method: 'tar' or '7z'
+ * @param string[] $excludeFiles Relative exclusion paths
  *
  * @return boolean True if archive was created successfully
  */
-function archiveDirectory(string $source, string $dest, string $method): bool
+function archiveDirectory(string $source, string $dest, string $method, array $excludeFiles = []): bool
 {
     if (!is_dir($source)) {
         outputError('Directory not found: ' . $source);
         return false;
     }
+
+    $excludeArgs = archiveExcludeArguments($excludeFiles, $method);
+
     if ($method === '7z') {
         $bin = require7zBinary();
         if ($bin === '') {
             return false;
         }
         $archiveFile = $dest . '.7z';
-        if (file_exists($archiveFile)) {
-            unlink($archiveFile);
+        $temporaryFile = archiveTemporaryPath($archiveFile);
+        if ($temporaryFile === '') {
+            return false;
         }
-        shell_exec(
-            $bin . ' a -mx=5 -bso0 -bsp0 '
-            . escapeshellarg($archiveFile) . ' '
-            . escapeshellarg($source . '/*')
-        );
-        return file_exists($archiveFile);
+
+        $command = 'cd ' . escapeshellarg($source) . ' && '
+            . escapeshellarg($bin) . ' a -t7z -mx=5 -bso0 -bsp0 '
+            . escapeshellarg($temporaryFile) . ' '
+            . escapeshellarg('./*')
+            . $excludeArgs;
+
+        return runArchiveCommand($command, $temporaryFile, $archiveFile);
     }
-    // Default: tar
+
     $archiveFile = $dest . '.tar.gz';
-    shell_exec(
-        'tar -C ' . escapeshellarg($source)
-        . ' -czf ' . escapeshellarg($archiveFile)
-        . ' --ignore-failed-read --warning=none .'
-    );
-    return file_exists($archiveFile);
+    $temporaryFile = archiveTemporaryPath($archiveFile);
+    if ($temporaryFile === '') {
+        return false;
+    }
+
+    $command = 'tar -C ' . escapeshellarg($source)
+        . ' -czf ' . escapeshellarg($temporaryFile)
+        . $excludeArgs . ' .';
+
+    return runArchiveCommand($command, $temporaryFile, $archiveFile);
 }
 
 /**
- * Archive a list of files using tar or 7z, then delete the source files
+ * Build archive exclusion arguments
+ *
+ * @param string[] $excludeFiles Relative exclusion paths
+ * @param string   $method       Archive method: 'tar' or '7z'
+ *
+ * @return string
+ */
+function archiveExcludeArguments(array $excludeFiles, string $method): string
+{
+    $arguments = '';
+
+    foreach ($excludeFiles as $excludeFile) {
+        if ($method === '7z') {
+            $arguments .= ' ' . escapeshellarg('-xr!' . $excludeFile);
+            continue;
+        }
+
+        $arguments .= ' --exclude=' . escapeshellarg($excludeFile);
+    }
+
+    return $arguments;
+}
+
+/**
+ * Archive a list of files using tar or 7z
  *
  * @param string[] $files  Absolute paths to files to include
  * @param string   $dest   Destination path without extension
@@ -417,32 +785,45 @@ function archiveDirectory(string $source, string $dest, string $method): bool
  */
 function archiveFiles(array $files, string $dest, string $method): bool
 {
+    if (empty($files)) {
+        outputError('No files available for archive: ' . $dest);
+        return false;
+    }
+
     if ($method === '7z') {
         $bin = require7zBinary();
         if ($bin === '') {
             return false;
         }
         $archiveFile = $dest . '.7z';
-        if (file_exists($archiveFile)) {
-            unlink($archiveFile);
+        $temporaryFile = archiveTemporaryPath($archiveFile);
+        if ($temporaryFile === '') {
+            return false;
         }
+
         $fileArgs = implode(' ', array_map('escapeshellarg', $files));
-        shell_exec($bin . ' a -mx=5 -bso0 -bsp0 ' . escapeshellarg($archiveFile) . ' ' . $fileArgs);
-        $result = file_exists($archiveFile);
+        $result = runArchiveCommand(
+            escapeshellarg($bin) . ' a -t7z -mx=5 -bso0 -bsp0 '
+            . escapeshellarg($temporaryFile) . ' ' . $fileArgs,
+            $temporaryFile,
+            $archiveFile
+        );
     } else {
-        // tar — archive relative to the common directory to avoid absolute path warnings
         $archiveFile = $dest . '.tar.gz';
-        $dir         = escapeshellarg(dirname(reset($files)));
-        $fileArgs    = implode(' ', array_map(fn($f) => escapeshellarg(basename($f)), $files));
-        shell_exec('tar -czf ' . escapeshellarg($archiveFile) . ' -C ' . $dir . ' ' . $fileArgs);
-        $result = file_exists($archiveFile);
-    }
-    // Cleanup source files
-    foreach ($files as $file) {
-        if (file_exists($file)) {
-            unlink($file);
+        $temporaryFile = archiveTemporaryPath($archiveFile);
+        if ($temporaryFile === '') {
+            return false;
         }
+
+        $dir      = escapeshellarg(dirname(reset($files)));
+        $fileArgs    = implode(' ', array_map(fn($f) => escapeshellarg(basename($f)), $files));
+        $result = runArchiveCommand(
+            'tar -czf ' . escapeshellarg($temporaryFile) . ' -C ' . $dir . ' ' . $fileArgs,
+            $temporaryFile,
+            $archiveFile
+        );
     }
+
     return $result;
 }
 
@@ -464,24 +845,8 @@ function archiveGlob(string $pattern, string $baseDir, string $dest, string $met
     if (empty($files)) {
         return false;
     }
-    if ($method === '7z') {
-        $bin = require7zBinary();
-        if ($bin === '') {
-            return false;
-        }
-        $archiveFile = $dest . '.7z';
-        if (file_exists($archiveFile)) {
-            unlink($archiveFile);
-        }
-        $fileArgs = implode(' ', array_map('escapeshellarg', $files));
-        shell_exec($bin . ' a -mx=5 -bso0 -bsp0 ' . escapeshellarg($archiveFile) . ' ' . $fileArgs);
-        return file_exists($archiveFile);
-    }
-    // Default: tar
-    $archiveFile = $dest . '.tar.gz';
-    $fileArgs    = implode(' ', array_map('escapeshellarg', $files));
-    shell_exec('tar -czf ' . escapeshellarg($archiveFile) . ' ' . $fileArgs);
-    return file_exists($archiveFile);
+
+    return archivePathList($files, $dest, $method, false);
 }
 
 /**
@@ -489,42 +854,254 @@ function archiveGlob(string $pattern, string $baseDir, string $dest, string $met
  *
  * Used for system config backup where paths/globs are listed one per line.
  *
- * @param string $fileListPath Path to the file containing paths/globs to archive
- * @param string $dest         Destination path without extension
- * @param string $method       Archive method: 'tar' or '7z'
+ * @param string|string[] $fileListPath Paths to one or more file lists
+ * @param string          $dest         Destination path without extension
+ * @param string          $method       Archive method: 'tar' or '7z'
  *
  * @return boolean True if archive was created successfully
  */
-function archiveFileList(string $fileListPath, string $dest, string $method): bool
+function archiveFileList($fileListPath, string $dest, string $method): bool
 {
+    $files = archiveFileListEntries($fileListPath);
+    if (empty($files)) {
+        outputError('No files matched system file list');
+        return false;
+    }
+    foreach ($files as $file) {
+        if (is_dir($file) && !isDestinationOutsideSource(dirname($dest), $file)) {
+            outputError('System source contains its backup destination: ' . $file);
+            return false;
+        }
+    }
+
+    return archivePathList($files, $dest, $method, true);
+}
+
+/**
+ * Archive absolute paths with the requested 7z pathname mode
+ *
+ * @param string[] $files         Absolute source paths
+ * @param string   $dest          Destination without extension
+ * @param string   $method        Archive method
+ * @param boolean  $preservePaths Preserve absolute paths in 7z archives
+ *
+ * @return boolean
+ */
+function archivePathList(array $files, string $dest, string $method, bool $preservePaths): bool
+{
+    $fileArgs = implode(' ', array_map('escapeshellarg', $files));
+    $archiveFile = $dest . ($method === '7z' ? '.7z' : '.tar.gz');
     if ($method === '7z') {
         $bin = require7zBinary();
         if ($bin === '') {
             return false;
         }
-        $archiveFile = $dest . '.7z';
-        if (file_exists($archiveFile)) {
-            unlink($archiveFile);
-        }
-        // 7z supports list files with @
-        // -spf: preserve full absolute paths (including leading /) for correct extraction to /
-        // -bso0: suppress normal output, -bsp0: suppress progress, -bse0: suppress warnings
-        // Missing paths in the file list are expected — archive creation check handles real failures
-        shell_exec(
-            $bin . ' a -mx=5 -spf -bso0 -bsp0 -bse0 '
-            . escapeshellarg($archiveFile)
-            . ' @' . escapeshellarg($fileListPath)
-        );
-        return file_exists($archiveFile);
     }
-    // Default: tar
-    $archiveFile = $dest . '.tar.gz';
-    shell_exec(
-        'tar -czf ' . escapeshellarg($archiveFile)
-        . ' --ignore-failed-read --warning=none --wildcards'
-        . ' $(cat ' . escapeshellarg($fileListPath) . ') 2>/dev/null'
-    );
-    return file_exists($archiveFile);
+    $temporaryFile = archiveTemporaryPath($archiveFile);
+    if ($temporaryFile === '') {
+        return false;
+    }
+    if ($method === '7z') {
+        $command = escapeshellarg($bin) . ' a -t7z -mx=5'
+            . ($preservePaths ? ' -spf' : '') . ' -bso0 -bsp0 '
+            . escapeshellarg($temporaryFile) . ' ' . $fileArgs;
+    } else {
+        $command = 'tar -czf ' . escapeshellarg($temporaryFile) . ' ' . $fileArgs;
+    }
+
+    return runArchiveCommand($command, $temporaryFile, $archiveFile);
+}
+
+/**
+ * Resolve archive file-list entries
+ *
+ * @param string|string[] $fileListPath File list paths
+ *
+ * @return string[]
+ */
+function archiveFileListEntries($fileListPath): array
+{
+    $entries = [];
+    foreach ((array) $fileListPath as $path) {
+        $lines = file($path, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+        if ($lines === false) {
+            outputError('Cannot read system file list: ' . $path);
+            return [];
+        }
+        $entries = array_merge($entries, $lines);
+    }
+
+    $files = [];
+    foreach ($entries as $entry) {
+        $entry = trim($entry);
+        if ($entry === '' || strpos($entry, '#') === 0) {
+            continue;
+        }
+
+        $matches = glob($entry, GLOB_NOSORT);
+        if ($matches === false) {
+            outputError('Invalid system file list pattern: ' . $entry);
+            return [];
+        }
+        if (empty($matches)) {
+            continue;
+        }
+
+        foreach ($matches as $match) {
+            $files[$match] = $match;
+        }
+    }
+
+    return array_values($files);
+}
+
+/**
+ * Create an archive temporary path
+ *
+ * @param string $archiveFile Final archive path
+ *
+ * @return string
+ */
+function archiveTemporaryPath(string $archiveFile): string
+{
+    $temporaryFile = tempnam(dirname($archiveFile), '.' . basename($archiveFile) . '.');
+    if ($temporaryFile === false) {
+        outputError('Cannot create temporary archive: ' . $archiveFile);
+        return '';
+    }
+
+    if (realpath(dirname($temporaryFile)) !== realpath(dirname($archiveFile))) {
+        unlink($temporaryFile);
+        outputError('Temporary archive is not beside destination: ' . $archiveFile);
+        return '';
+    }
+
+    if (!unlink($temporaryFile)) {
+        outputError('Cannot prepare temporary archive: ' . $temporaryFile);
+        return '';
+    }
+
+    return $temporaryFile;
+}
+
+/**
+ * Run and finalize an archive command
+ *
+ * @param string $command       Archive command
+ * @param string $temporaryFile Temporary archive path
+ * @param string $archiveFile   Final archive path
+ *
+ * @return boolean
+ */
+function runArchiveCommand(string $command, string $temporaryFile, string $archiveFile): bool
+{
+    if (!runCommand($command, 'Archive command', true)) {
+        if (file_exists($temporaryFile)) {
+            unlink($temporaryFile);
+        }
+        return false;
+    }
+
+    if (!is_file($temporaryFile) || filesize($temporaryFile) === 0) {
+        outputError('Archive was not created: ' . $archiveFile);
+        if (file_exists($temporaryFile)) {
+            unlink($temporaryFile);
+        }
+        return false;
+    }
+
+    if (!rename($temporaryFile, $archiveFile)) {
+        outputError('Cannot finalize archive: ' . $archiveFile);
+        return false;
+    }
+
+    return true;
+}
+
+/**
+ * Run a command and require a zero exit status
+ *
+ * @param string  $command     Command to run
+ * @param string  $label       Error label
+ * @param boolean $showDetails Show bounded command output on failure
+ *
+ * @return boolean
+ */
+function runCommand(string $command, string $label, bool $showDetails = false): bool
+{
+    return runCommandOutput($command, $label, $showDetails) !== null;
+}
+
+/**
+ * Run a command and return its output
+ *
+ * @param string  $command     Command to run
+ * @param string  $label       Error label
+ * @param boolean $showDetails Show bounded command output on failure
+ * @param string  $hint        Suggested next step on failure
+ *
+ * @return string[]|null
+ */
+function runCommandOutput(string $command, string $label, bool $showDetails = false, string $hint = ''): ?array
+{
+    $output = [];
+    $exitCode = 0;
+    exec($command . ' 2>&1', $output, $exitCode);
+    if ($exitCode !== 0) {
+        outputError($label . ' failed (exit code ' . $exitCode . ')', $hint);
+        if ($showDetails) {
+            outputCommandDetails($output);
+        }
+        return null;
+    }
+
+    return $output;
+}
+
+/**
+ * Report bounded command output
+ *
+ * @param string[] $lines Command output
+ *
+ * @return void
+ */
+function outputCommandDetails(array $lines): void
+{
+    foreach (array_slice($lines, -5) as $line) {
+        $line = preg_replace('/[\x00-\x1f\x7f]/', ' ', $line);
+        if ($line !== '') {
+            output('  ' . substr($line, 0, 300));
+        }
+    }
+}
+
+/**
+ * Quote an argument for the remote shell
+ *
+ * @param string $value Argument value
+ *
+ * @return string
+ */
+function remoteShellArg(string $value): string
+{
+    return '\'' . str_replace('\'', '\'"\'"\'', $value) . '\'';
+}
+
+/**
+ * Run an SSH remote command
+ *
+ * @param string  $ssh         SSH binary path
+ * @param string  $host        SSH host alias
+ * @param string  $command     Remote command
+ * @param string  $label       Error label
+ * @param boolean $showDetails Show bounded command output on failure
+ *
+ * @return boolean
+ */
+function runRemoteCommand(string $ssh, string $host, string $command, string $label, bool $showDetails = false): bool
+{
+    return runCommand(escapeshellarg($ssh) . ' ' . escapeshellarg($host)
+        . ' ' . escapeshellarg($command), $label, $showDetails);
 }
 
 // =============================================================================
@@ -585,7 +1162,7 @@ function dbRunSQL(\PDO $pdo, string $sql): array
 /**
  * Dump a database and its grants to a compressed archive
  *
- * Runs mysqldump, writes a grants file, archives both, then deletes the originals.
+ * Runs mysqldump, writes grants, archives both, then removes the private inputs.
  *
  * @param string $dbName      Database name
  * @param string $destDir     Destination directory for the archive
@@ -596,7 +1173,7 @@ function dbRunSQL(\PDO $pdo, string $sql): array
  * @param string $method      Archive method: 'tar' or '7z'
  * @param string $archiveName Output archive base name (defaults to $dbName)
  *
- * @return void
+ * @return boolean True when dump, grants and final archive succeed
  */
 function dumpDatabase(
     string $dbName,
@@ -607,28 +1184,71 @@ function dumpDatabase(
     string $sqlHost,
     string $method,
     string $archiveName = ''
-): void {
+): bool {
     $archiveName = $archiveName !== '' ? $archiveName : $dbName;
-    $sqlFile     = $destDir . '/' . $dbName . '.sql';
-    $grantFile   = $destDir . '/' . $dbName . '-grants.sql';
+    if (!isSafePathComponent($dbName) || !isSafePathComponent($archiveName)) {
+        outputError('Invalid database archive name');
+        return false;
+    }
 
-    // Dump database
     $mysqldump = requireBinary('mysqldump');
     if ($mysqldump === '') {
-        return;
+        return false;
     }
-    shell_exec(
-        $mysqldump . ' --opt --force --allow-keywords'
+
+    $recoveryRoot = dirname(__DIR__) . '/recovery';
+    if (!ensureSecureRuntimeDirectory($recoveryRoot)) {
+        return false;
+    }
+    $workspace = $recoveryRoot . '/dump-' . bin2hex(random_bytes(12));
+    if (!mkdir($workspace, 0700)) {
+        outputError('Cannot create database recovery workspace');
+        return false;
+    }
+    $sqlFile = $workspace . '/' . $dbName . '.sql';
+    $grantFile = $workspace . '/' . $dbName . '-grants.sql';
+    $fp = fopen($sqlFile, 'x');
+    if ($fp === false || !chmod($sqlFile, 0600)) {
+        outputError('Cannot prepare private database dump: ' . $workspace);
+        return false;
+    }
+    fclose($fp);
+
+    $command = escapeshellarg($mysqldump) . ' --opt --allow-keywords'
         . ' -h ' . escapeshellarg($sqlHost)
         . ' ' . escapeshellarg($dbName)
-        . ' -r ' . escapeshellarg($sqlFile)
-    );
+        . ' -r ' . escapeshellarg($sqlFile);
+    if (!runCommand($command, 'Database dump for ' . $dbName, true)) {
+        outputError('Database recovery files kept at ' . $workspace);
+        return false;
+    }
+    if (!is_file($sqlFile) || filesize($sqlFile) === 0) {
+        outputError('Database dump is empty; recovery files kept at ' . $workspace);
+        return false;
+    }
 
-    // Write grants file
-    dumpGrants($dbRoot, $dbUser, $dbHost, $grantFile);
+    if (!dumpGrants($dbRoot, $dbUser, $dbHost, $grantFile)) {
+        outputError('Database recovery files kept at ' . $workspace);
+        return false;
+    }
 
-    // Archive + cleanup
-    archiveFiles([$sqlFile, $grantFile], $destDir . '/' . $archiveName, $method);
+    if (!archiveFiles([$sqlFile, $grantFile], $destDir . '/' . $archiveName, $method)) {
+        outputError('Database backup archive failed: ' . $dbName);
+        outputError('Database recovery files kept at ' . $workspace);
+        return false;
+    }
+
+    if (!unlink($sqlFile) || !unlink($grantFile)) {
+        outputError('Cannot remove database sources; inspect ' . $workspace);
+        return false;
+    }
+
+    if (!rmdir($workspace)) {
+        outputError('Cannot remove empty database workspace: ' . $workspace);
+        return false;
+    }
+
+    return true;
 }
 
 /**
@@ -639,23 +1259,45 @@ function dumpDatabase(
  * @param string $host     Database host
  * @param string $destFile Destination file path
  *
- * @return void
+ * @return boolean
  */
-function dumpGrants(\PDO $dbRoot, string $user, string $host, string $destFile): void
+function dumpGrants(\PDO $dbRoot, string $user, string $host, string $destFile): bool
 {
-    $grants = dbRunSQL($dbRoot, 'SHOW GRANTS FOR \'' . $user . '\'@\'' . $host . '\'');
-    $fp     = fopen($destFile, 'w');
+    try {
+        $grants = dbRunSQL($dbRoot, 'SHOW GRANTS FOR ' . $dbRoot->quote($user) . '@' . $dbRoot->quote($host));
+    } catch (\Throwable $error) {
+        outputError('Cannot read database grants: ' . $error->getMessage());
+        return false;
+    }
+    if ($grants === []) {
+        outputError('No database grants returned for backup');
+        return false;
+    }
+    $fp = fopen($destFile, 'x');
     if (!$fp) {
         outputError('Cannot write grants file: ' . $destFile);
-        return;
+        return false;
+    }
+    if (!chmod($destFile, 0600)) {
+        fclose($fp);
+        outputError('Cannot restrict grants file: ' . $destFile);
+        return false;
     }
     foreach ($grants as $grant) {
         foreach ($grant as $comment => $value) {
-            fwrite($fp, '# ' . $comment . "\n");
-            fwrite($fp, $value . ";\n\r");
+            if (!writeAllStream($fp, '# ' . $comment . "\n" . $value . ";\n")) {
+                fclose($fp);
+                outputError('Cannot write grants file: ' . $destFile);
+                return false;
+            }
         }
     }
-    fclose($fp);
+    if (!fclose($fp)) {
+        outputError('Cannot close grants file: ' . $destFile);
+        return false;
+    }
+
+    return true;
 }
 
 // =============================================================================
@@ -687,28 +1329,33 @@ function getSetting(\PDO $db, string $varname): ?string
  * @param string $host      SSH host alias (from ~/.ssh/config)
  * @param string $localDir  Local source directory
  * @param string $remoteDir Remote destination directory
- * @param string $params    Rsync parameters
- *
  * @return boolean True on success
  */
-function doRsync(string $host, string $localDir, string $remoteDir, string $params): bool
+function doRsync(string $host, string $localDir, string $remoteDir): bool
 {
+    if (
+        preg_match('/^[A-Za-z0-9_.@-]+$/D', $host) !== 1 || $host[0] === '-'
+        || !isSafeRemotePath($remoteDir) || !is_dir($localDir)
+    ) {
+        outputError('Unsafe rsync source or destination');
+        return false;
+    }
     $ssh   = requireBinary('ssh');
     $rsync = requireBinary('rsync');
     if ($ssh === '' || $rsync === '') {
         return false;
     }
-    // Ensure remote destination exists
-    shell_exec($ssh . ' ' . escapeshellarg($host) . ' mkdir -p ' . escapeshellarg($remoteDir));
+    if (!runRemoteCommand($ssh, $host, 'mkdir -p -- ' . remoteShellArg($remoteDir), 'Remote directory creation')) {
+        return false;
+    }
 
-    // Sync
-    shell_exec(
-        $rsync . ' ' . $params . ' '
+    return runCommand(
+        escapeshellarg($rsync) . ' -ra --delete-after '
         . escapeshellarg($localDir . '/') . ' '
-        . escapeshellarg($host . ':' . $remoteDir . '/')
+        . escapeshellarg($host . ':' . $remoteDir . '/'),
+        'Rsync',
+        true
     );
-
-    return true;
 }
 
 /**
@@ -717,20 +1364,58 @@ function doRsync(string $host, string $localDir, string $remoteDir, string $para
  * @param string $host      SSH host alias
  * @param string $remoteDir Remote directory path
  *
- * @return string[] List of entries
+ * @return string[]|null List of entries, or null on failure
  */
-function rsyncList(string $host, string $remoteDir): array
+function rsyncList(string $host, string $remoteDir): ?array
 {
-    $ssh = requireBinary('ssh');
-    if ($ssh === '') {
-        return [];
+    if (
+        preg_match('/^[A-Za-z0-9_.@-]+$/D', $host) !== 1 || $host[0] === '-'
+        || !isSafeRemotePath($remoteDir)
+    ) {
+        outputError('Unsafe remote backup listing');
+        return null;
     }
-    $output = shell_exec($ssh . ' ' . escapeshellarg($host) . ' ls ' . escapeshellarg($remoteDir) . ' 2>/dev/null');
-    if ($output === null || $output === '') {
-        return [];
+    $ssh = requireBinary('ssh');
+    $rsync = requireBinary('rsync');
+    if ($ssh === '' || $rsync === '') {
+        return null;
+    }
+    if (!runRemoteCommand($ssh, $host, 'mkdir -p -- ' . remoteShellArg($remoteDir), 'Remote backup directory')) {
+        return null;
+    }
+    $output = runCommandOutput(
+        escapeshellarg($rsync) . ' --list-only -- '
+        . escapeshellarg($host . ':' . $remoteDir . '/'),
+        'Remote backup listing',
+        true,
+        'Check rsync access to the configured remote path.'
+    );
+    if ($output === null) {
+        return null;
     }
 
-    return array_filter(explode(PHP_EOL, rtrim(str_replace(' ', PHP_EOL, $output))));
+    $directories = [];
+    foreach ($output as $line) {
+        if (preg_match('/\s(\S+)$/D', $line, $matches) !== 1) {
+            continue;
+        }
+        $entry = rtrim($matches[1], '/');
+        if (!isBackupDateDirectory($entry)) {
+            continue;
+        }
+        if (preg_match('/^[-dlbcps][rwxstST-]{9}[+@.]?\s/', $line) !== 1) {
+            outputError(
+                'Cannot verify remote backup entry type: ' . $remoteDir . '/' . $entry,
+                'Check the rsync --list-only output; retention was skipped.'
+            );
+            return null;
+        }
+        if ($line[0] === 'd') {
+            $directories[] = $entry;
+        }
+    }
+
+    return array_values(array_unique($directories));
 }
 
 /**
@@ -740,23 +1425,64 @@ function rsyncList(string $host, string $remoteDir): array
  * @param string   $remoteDir Remote base directory
  * @param string[] $files     Entries (relative to $remoteDir) to delete
  *
- * @return void
+ * @return boolean
  */
-function rsyncDeleteFiles(string $host, string $remoteDir, array $files): void
+function rsyncDeleteFiles(string $host, string $remoteDir, array $files): bool
 {
     if (empty($files)) {
-        return;
+        return true;
+    }
+    if (
+        preg_match('/^[A-Za-z0-9_.@-]+$/D', $host) !== 1 || $host[0] === '-'
+        || !isSafeRemotePath($remoteDir)
+    ) {
+        outputError('Unsafe remote backup deletion');
+        return false;
     }
     $ssh = requireBinary('ssh');
     if ($ssh === '') {
-        return;
+        return false;
     }
     foreach ($files as $file) {
-        shell_exec(
-            $ssh . ' ' . escapeshellarg($host)
-            . ' rm -rf ' . escapeshellarg($remoteDir . '/' . $file)
+        if (!isBackupDateDirectory($file)) {
+            outputError('Refusing invalid remote backup directory: ' . $file);
+            return false;
+        }
+        $deleted = runRemoteCommand(
+            $ssh,
+            $host,
+            'rm -rf -- ' . remoteShellArg($remoteDir . '/' . $file),
+            'Remote backup deletion',
+            true
         );
+        if (!$deleted) {
+            return false;
+        }
     }
+
+    return true;
+}
+
+/**
+ * Delete expired rsync backups
+ *
+ * @param string  $host      SSH host alias
+ * @param string  $remoteDir Remote base directory
+ * @param string  $date      Current date
+ * @param integer $days      Retention days
+ *
+ * @return integer
+ */
+function rsyncDeleteExpired(string $host, string $remoteDir, string $date, int $days): ?int
+{
+    $files = rsyncList($host, $remoteDir);
+    if ($files === null) {
+        return null;
+    }
+
+    $expired = deletableFiles($date, $files, $days);
+
+    return rsyncDeleteFiles($host, $remoteDir, $expired) ? count($expired) : null;
 }
 
 // =============================================================================
@@ -768,22 +1494,24 @@ function rsyncDeleteFiles(string $host, string $remoteDir, array $files): void
  *
  * @param string $localDir  Local source directory
  * @param string $remoteDir S3 destination path
- * @param string $params    S3cmd parameters
- *
  * @return boolean True on success
  */
-function doS3Sync(string $localDir, string $remoteDir, string $params): bool
+function doS3Sync(string $localDir, string $remoteDir): bool
 {
+    if (!isSafeS3Path($remoteDir) || !is_dir($localDir)) {
+        outputError('Unsafe S3 source or destination');
+        return false;
+    }
     $bin = requireBinary('s3cmd');
     if ($bin === '') {
         return false;
     }
-    shell_exec(
-        $bin . ' ' . $params . ' '
+    return runCommand(
+        escapeshellarg($bin) . ' sync --delete-removed --quiet --no-guess-mime-type --human-readable-sizes '
         . escapeshellarg($localDir . '/') . ' '
-        . $remoteDir . '/'
+        . escapeshellarg($remoteDir . '/'),
+        'S3 sync'
     );
-    return true;
 }
 
 /**
@@ -791,41 +1519,160 @@ function doS3Sync(string $localDir, string $remoteDir, string $params): bool
  *
  * @param string $remoteDir S3 path
  *
- * @return string[] List of object keys
+ * @return string[]|null List of object keys, or null on failure
  */
-function s3List(string $remoteDir): array
+function s3List(string $remoteDir): ?array
 {
+    if (!isSafeS3Path($remoteDir)) {
+        outputError('Unsafe S3 backup listing');
+        return null;
+    }
     $bin = requireBinary('s3cmd');
     if ($bin === '') {
-        return [];
+        return null;
     }
-    $output = shell_exec($bin . ' ls --recursive ' . $remoteDir . ' | awk \'{print $4}\'');
-    if ($output === null || $output === '') {
-        return [];
+    $output = runCommandOutput(escapeshellarg($bin) . ' ls --recursive ' . escapeshellarg($remoteDir), 'S3 backup listing');
+    if ($output === null) {
+        return null;
     }
 
-    return array_filter(explode(PHP_EOL, rtrim($output)));
+    $files = [];
+    $prefix = rtrim($remoteDir, '/') . '/';
+    foreach ($output as $line) {
+        if (preg_match('/^\S+\s+\S+\s+\S+\s+(s3:\/\/.*)$/', $line, $matches)) {
+            $file = $matches[1];
+            if (strpos($file, $prefix) !== 0) {
+                continue;
+            }
+            $relative = substr($file, strlen($prefix));
+            $segments = explode('/', $relative);
+            if (count($segments) > 1 && isBackupDateDirectory($segments[0])) {
+                $files[] = $file;
+            }
+        }
+    }
+
+    return $files;
 }
 
 /**
  * Delete objects from S3 using s3cmd
  *
- * @param string[] $files Full S3 object paths to delete
+ * @param string   $remoteDir S3 base path
+ * @param string   $date      Current date
+ * @param integer  $days      Retention days
+ * @param string[] $files     Full S3 object paths to delete
  *
- * @return void
+ * @return boolean
  */
-function s3DeleteFiles(array $files): void
+function s3DeleteFiles(string $remoteDir, string $date, int $days, array $files): bool
 {
     if (empty($files)) {
-        return;
-    }
-    $bin = requireBinary('s3cmd');
-    if ($bin === '') {
-        return;
+        return true;
     }
     foreach ($files as $file) {
-        shell_exec($bin . ' del ' . escapeshellarg($file));
+        if (!is_string($file) || !isSafeS3ExpiredObject($remoteDir, $date, $days, $file)) {
+            outputError('Unsafe S3 backup deletion');
+            return false;
+        }
     }
+
+    $bin = requireBinary('s3cmd');
+    if ($bin === '') {
+        return false;
+    }
+    foreach ($files as $file) {
+        if (!runCommand(escapeshellarg($bin) . ' del ' . escapeshellarg($file), 'S3 backup deletion')) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+/**
+ * Delete expired S3 backups
+ *
+ * @param string  $remoteDir S3 base path
+ * @param string  $date      Current date
+ * @param integer $days      Retention days
+ *
+ * @return integer
+ */
+function s3DeleteExpired(string $remoteDir, string $date, int $days): ?int
+{
+    $files = s3List($remoteDir);
+    if ($files === null) {
+        return null;
+    }
+
+    $expired = s3ExpiredObjects($remoteDir, $date, $days, $files);
+
+    return s3DeleteFiles($remoteDir, $date, $days, $expired) ? count($expired) : null;
+}
+
+/**
+ * Check an S3 object under an expired snapshot directory
+ *
+ * @param string  $remoteDir S3 base path
+ * @param string  $date      Current date
+ * @param integer $days      Retention days
+ * @param string  $file      Full S3 object path
+ *
+ * @return boolean
+ */
+function isSafeS3ExpiredObject(string $remoteDir, string $date, int $days, string $file): bool
+{
+    if (!isSafeS3Path($remoteDir) || !isBackupDateDirectory($date) || $days < 1) {
+        return false;
+    }
+    $prefix = rtrim($remoteDir, '/') . '/';
+    if (strpos($file, $prefix) !== 0) {
+        return false;
+    }
+    $parts = explode('/', substr($file, strlen($prefix)));
+    if (
+        count($parts) < 2 || !isBackupDateDirectory($parts[0])
+        || strtotime($parts[0] . ' midnight') > strtotime($date . ' midnight -' . $days . ' days')
+    ) {
+        return false;
+    }
+    foreach ($parts as $part) {
+        if (!isSafePathComponent($part)) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+/**
+ * Select S3 keys by the immediate snapshot directory below a base URL
+ *
+ * @param string   $remoteDir S3 base URL
+ * @param string   $date      Current date
+ * @param integer  $days      Retention days
+ * @param string[] $files     Listed object URLs
+ *
+ * @return string[] Expired object URLs
+ */
+function s3ExpiredObjects(string $remoteDir, string $date, int $days, array $files): array
+{
+    $expired = [];
+    $prefix = rtrim($remoteDir, '/') . '/';
+    $cutoff = strtotime($date . ' midnight -' . $days . ' days');
+    foreach ($files as $file) {
+        if (strpos($file, $prefix) !== 0) {
+            continue;
+        }
+        $relative = substr($file, strlen($prefix));
+        $snapshot = explode('/', $relative, 2)[0];
+        if (isBackupDateDirectory($snapshot) && strtotime($snapshot . ' midnight') <= $cutoff) {
+            $expired[] = $file;
+        }
+    }
+
+    return $expired;
 }
 
 // =============================================================================
@@ -844,28 +1691,88 @@ function s3DeleteFiles(array $files): void
  *
  * @return integer Number of directories removed
  */
-function cleanLocalBackups(string $baseDir, string $today, int $days): int
+function cleanLocalBackups(string $baseDir, string $today, int $days): ?int
 {
     if (!is_dir($baseDir)) {
         return 0;
+    }
+    if (!isCreatableBackupPath($baseDir)) {
+        outputError('Unsafe local retention root: ' . $baseDir);
+        return null;
     }
 
     $removed         = 0;
     $cutoffTimestamp = strtotime($today . ' midnight -' . $days . ' days');
     $entries         = scandir($baseDir);
+    if ($entries === false) {
+        outputError('Cannot list local retention root: ' . $baseDir);
+        return null;
+    }
 
     foreach ($entries as $entry) {
-        if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $entry)) {
+        if (!isBackupDateDirectory($entry)) {
             continue;
         }
         $entryTimestamp = strtotime($entry . ' midnight');
         if ($entryTimestamp <= $cutoffTimestamp) {
             $path = $baseDir . '/' . $entry;
+            if (is_link($path)) {
+                outputError('Unsafe local retention entry: ' . $path);
+                return null;
+            }
             if (is_dir($path)) {
-                shell_exec('rm -rf ' . escapeshellarg($path));
+                if (!removeBackupDirectory($path)) {
+                    return null;
+                }
                 $removed++;
             }
         }
+    }
+
+    return $removed;
+}
+
+/**
+ * Prune dated snapshots below validated customer directories
+ *
+ * @param string  $baseDir Customer backup root
+ * @param string  $today   Reference date
+ * @param integer $days    Days to keep
+ *
+ * @return integer|null Number removed, or null on failure
+ */
+function cleanCustomerBackups(string $baseDir, string $today, int $days): ?int
+{
+    if (!isCreatableBackupPath($baseDir)) {
+        outputError('Unsafe customer retention root: ' . $baseDir);
+        return null;
+    }
+    if (!is_dir($baseDir)) {
+        return 0;
+    }
+    $entries = scandir($baseDir);
+    if ($entries === false) {
+        outputError('Cannot list customer retention root: ' . $baseDir);
+        return null;
+    }
+    $removed = 0;
+    foreach ($entries as $entry) {
+        if ($entry === '.' || $entry === '..') {
+            continue;
+        }
+        $path = $baseDir . '/' . $entry;
+        if (!isSafePathComponent($entry) || is_link($path)) {
+            outputError('Unsafe customer retention entry: ' . $entry);
+            return null;
+        }
+        if (!is_dir($path)) {
+            continue;
+        }
+        $count = cleanLocalBackups($path, $today, $days);
+        if ($count === null) {
+            return null;
+        }
+        $removed += $count;
     }
 
     return $removed;
@@ -888,9 +1795,9 @@ function deletableFiles(string $date, array $files, int $days): array
     $cutoffTimestamp  = strtotime($date . ' midnight -' . $days . ' days');
 
     foreach ($files as $file) {
-        preg_match('/\d{4}-\d{2}-\d{2}/', $file, $matches);
-        if (!empty($matches)) {
-            $fileTimestamp = strtotime($matches[0] . ' midnight');
+        $entry = basename(rtrim($file, '/'));
+        if (isBackupDateDirectory($entry)) {
+            $fileTimestamp = strtotime($entry . ' midnight');
             if ($fileTimestamp <= $cutoffTimestamp) {
                 $deletables[] = $file;
             }
@@ -898,6 +1805,24 @@ function deletableFiles(string $date, array $files, int $days): array
     }
 
     return $deletables;
+}
+
+/**
+ * Check a backup date-directory name
+ *
+ * @param string $entry Directory name
+ *
+ * @return boolean
+ */
+function isBackupDateDirectory(string $entry): bool
+{
+    if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $entry)) {
+        return false;
+    }
+
+    $date = \DateTime::createFromFormat('!Y-m-d', $entry);
+
+    return $date !== false && $date->format('Y-m-d') === $entry;
 }
 
 // =============================================================================
@@ -1038,44 +1963,399 @@ function summaryTotalSize(): int
 // =============================================================================
 
 /**
- * Validate the merged config array and output errors for any issues found
+ * Resolve an explicit or system timezone
+ *
+ * @param string      $configured Configured IANA timezone, or empty for automatic detection
+ * @param string|null $source     Resolved source description
+ *
+ * @return string|null IANA timezone, or null when invalid
+ */
+function resolveTimezone(string $configured, ?string &$source = null): ?string
+{
+    $source = null;
+    $timezones = timezone_identifiers_list();
+    $configured = trim($configured);
+    if ($configured !== '') {
+        if (in_array($configured, $timezones, true)) {
+            $source = 'configuration';
+
+            return $configured;
+        }
+
+        return null;
+    }
+
+    if (is_file('/etc/timezone') && is_readable('/etc/timezone')) {
+        $timezone = trim((string) file_get_contents('/etc/timezone'));
+        if (in_array($timezone, $timezones, true)) {
+            $source = '/etc/timezone';
+
+            return $timezone;
+        }
+    }
+
+    $localtime = realpath('/etc/localtime');
+    if ($localtime !== false && preg_match('~/(?:zoneinfo|zoneinfo\.default)/(.+)$~D', $localtime, $matches) === 1) {
+        if (in_array($matches[1], $timezones, true)) {
+            $source = '/etc/localtime';
+
+            return $matches[1];
+        }
+    }
+
+    $phpTimezone = trim((string) ini_get('date.timezone'));
+    if ($phpTimezone !== '' && in_array($phpTimezone, $timezones, true)) {
+        $source = 'CLI PHP configuration';
+
+        return $phpTimezone;
+    }
+    $phpTimezone = date_default_timezone_get();
+    if (in_array($phpTimezone, $timezones, true)) {
+        $source = 'CLI PHP default';
+
+        return $phpTimezone;
+    }
+
+    return null;
+}
+
+/**
+ * List external tools required by enabled features
  *
  * @param array $config Merged config array
  *
+ * @return string[]
+ */
+function requiredToolLabels(array $config): array
+{
+    $customers = is_array($config['customers'] ?? null) ? $config['customers'] : [];
+    $vhosts = is_array($customers['vhosts'] ?? null) ? $customers['vhosts'] : [];
+    $system = is_array($config['system'] ?? null) ? $config['system'] : [];
+    $panel = is_array($config['control_panel'] ?? null) ? $config['control_panel'] : [];
+    $needsFroxlor = ($customers['enabled'] ?? false) === true || ($panel['enabled'] ?? false) === true;
+    $needsArchive = (($customers['enabled'] ?? false) === true
+        && (($vhosts['enabled'] ?? false) === true || ($customers['databases'] ?? false) === true
+            || ($customers['logs'] ?? false) === true || ($customers['mails'] ?? false) === true))
+        || ($system['enabled'] ?? false) === true || ($panel['enabled'] ?? false) === true;
+
+    $tools = [];
+    if ($needsArchive) {
+        $method = $config['archive_method'] ?? null;
+        $archive = $method === '7z' ? find7zBinary() : ($method === 'tar' ? findBinary('tar') : '');
+        $tools[] = $archive !== '' ? basename($archive) : 'valid archiver';
+    }
+    if (
+        (($customers['enabled'] ?? false) === true && ($customers['databases'] ?? false) === true)
+        || ($panel['enabled'] ?? false) === true
+    ) {
+        $tools[] = 'mysqldump';
+    }
+    if ($needsFroxlor && isRootProcess() && is_string($panel['path'] ?? null)) {
+        $owner = fileowner($panel['path'] . '/lib/userdata.inc.php');
+        if ($owner !== false && $owner !== 0) {
+            $tools[] = 'runuser';
+        }
+    }
+    if (is_array($config['rsync'] ?? null) && ($config['rsync']['enabled'] ?? false) === true) {
+        $tools[] = 'rsync';
+        $tools[] = 'ssh';
+    }
+    if (is_array($config['s3'] ?? null) && ($config['s3']['enabled'] ?? false) === true) {
+        $tools[] = 's3cmd';
+    }
+
+    return $tools;
+}
+
+/**
+ * Describe successful installation checks
+ *
+ * @param array   $config    Merged config array
+ * @param boolean $sendEmail Include test-email capabilities
+ *
+ * @return string[]
+ */
+function installationCheckLines(array $config, bool $sendEmail = false): array
+{
+    $customers = $config['customers'];
+    $panel = $config['control_panel'];
+    $needsFroxlor = $customers['enabled'] || $panel['enabled'];
+    $emailEnabled = $config['email']['enabled'] || $sendEmail;
+
+    $capabilities = ['POSIX', 'exec'];
+    if ($needsFroxlor) {
+        $capabilities[] = 'proc_open';
+        $capabilities[] = 'PDO MySQL';
+    }
+    if ($emailEnabled) {
+        $capabilities[] = 'stream sockets';
+        if (($config['email']['smtp']['encryption'] ?? 'tls') !== '') {
+            $capabilities[] = 'OpenSSL';
+        }
+    }
+
+    $timezoneSource = null;
+    $timezone = resolveTimezone($config['timezone'], $timezoneSource);
+
+    $lines = [
+        'PHP ' . PHP_VERSION . ' (required: 7.4+): ' . implode(', ', $capabilities),
+        'Timezone: ' . $timezone . ' (' . $timezoneSource . ')',
+        'Configuration and trusted backup inputs',
+        'Backup and runtime paths',
+    ];
+    if ($needsFroxlor) {
+        $userdata = $panel['path'] . '/lib/userdata.inc.php';
+        $owner = fileowner($userdata);
+        $account = $owner !== false ? posix_getpwuid($owner) : false;
+        $ownerName = is_array($account) && isset($account['name']) ? $account['name'] : 'UID ' . $owner;
+        if (isRootProcess() && $owner !== 0) {
+            $lines[] = 'Froxlor settings access: ' . $ownerName . ' via runuser';
+        } elseif ($owner === 0) {
+            $lines[] = 'Froxlor settings access: root-owned trusted files';
+        } else {
+            $lines[] = 'Froxlor settings access: ' . $ownerName;
+        }
+    }
+    $tools = requiredToolLabels($config);
+    $lines[] = 'Enabled tools: ' . ($tools ? implode(', ', $tools) : 'none');
+
+    return $lines;
+}
+
+/**
+ * Validate the merged config array and output errors for any issues found
+ *
+ * @param array   $config    Merged config array
+ * @param boolean $sendEmail Include test-email validation
+ *
  * @return boolean True if config is valid
  */
-function validateConfig(array $config): bool
+function validateConfig(array $config, bool $sendEmail = false): bool
 {
     $valid = true;
+    $projectDir = dirname(__DIR__);
+    if (PHP_VERSION_ID < 70400) {
+        outputError('PHP 7.4 or newer is required');
+        $valid = false;
+    }
+    if (!function_exists('posix_geteuid')) {
+        outputError('POSIX effective-UID support is required');
+        $valid = false;
+    }
+    if (!isPhpFunctionAvailable('exec')) {
+        outputError(
+            'CLI PHP cannot run required backup commands.',
+            'Enable exec in the CLI PHP configuration and rerun --check-install.'
+        );
+        $valid = false;
+    }
+
+    foreach (['customers', 'system', 'control_panel', 'rsync', 's3', 'email'] as $section) {
+        if (!isset($config[$section]) || !is_array($config[$section])) {
+            outputError('Invalid configuration section: ' . $section);
+            return false;
+        }
+        if (!isset($config[$section]['enabled']) || !is_bool($config[$section]['enabled'])) {
+            outputError('Invalid enabled setting: ' . $section);
+            return false;
+        }
+    }
+    if (
+        !isset($config['customers']['vhosts']) || !is_array($config['customers']['vhosts'])
+        || !isset($config['email']['smtp']) || !is_array($config['email']['smtp'])
+    ) {
+        outputError('Invalid nested configuration section');
+        return false;
+    }
+    if (!is_string($config['timezone'] ?? null) || resolveTimezone($config['timezone']) === null) {
+        outputError('Invalid timezone. Use an IANA name or an empty value for system detection.');
+        $valid = false;
+    }
+    if (!in_array($config['archive_method'] ?? null, ['tar', '7z'], true)) {
+        outputError('archive_method must be tar or 7z');
+        $valid = false;
+    }
+    if (!is_int($config['keep_local_days'] ?? null) || $config['keep_local_days'] < 0) {
+        outputError('keep_local_days must be a non-negative integer');
+        $valid = false;
+    }
+    if (!is_bool($config['clean_before_backup'] ?? null)) {
+        outputError('clean_before_backup must be boolean');
+        $valid = false;
+    }
+    foreach (['vhosts', 'databases', 'logs', 'mails'] as $key) {
+        $value = $key === 'vhosts' ? ($config['customers']['vhosts']['enabled'] ?? null) : ($config['customers'][$key] ?? null);
+        if (!is_bool($value)) {
+            outputError('customers.' . $key . ' must be boolean');
+            $valid = false;
+        }
+    }
+    foreach (['separate_archives', 'goaccess'] as $key) {
+        if (!is_bool($config['customers']['vhosts'][$key] ?? null)) {
+            outputError('customers.vhosts.' . $key . ' must be boolean');
+            $valid = false;
+        }
+    }
+    if (!is_array($config['customers']['vhosts']['exclude_domains'] ?? null)) {
+        outputError('customers.vhosts.exclude_domains must be an array');
+        $valid = false;
+    } else {
+        foreach ($config['customers']['vhosts']['exclude_domains'] as $domain) {
+            if (!is_string($domain) || preg_match('/^[A-Za-z0-9.-]+$/D', $domain) !== 1) {
+                outputError('Invalid excluded domain');
+                $valid = false;
+            }
+        }
+    }
+    foreach (['rsync', 's3'] as $name) {
+        $sync = $config[$name];
+        if (
+            !in_array($sync['delete_strategy'] ?? null, ['before', 'after'], true)
+            || !is_int($sync['keep_days'] ?? null) || $sync['keep_days'] < 1
+        ) {
+            outputError('Invalid ' . $name . ' retention settings');
+            $valid = false;
+        }
+    }
+    if (
+        !is_string($config['customers']['dir'] ?? null) || !isSafeBackupRoot($config['customers']['dir'])
+        || !is_string($config['system']['dir'] ?? null) || !isSafeBackupRoot($config['system']['dir'])
+        || strpos(rtrim($config['system']['dir'], '/') . '/', rtrim($config['customers']['dir'], '/') . '/') === 0
+        || strpos(rtrim($config['customers']['dir'], '/') . '/', rtrim($config['system']['dir'], '/') . '/') === 0
+    ) {
+        outputError('Backup roots must be separate safe absolute directories');
+        $valid = false;
+    }
+    if (!$config['customers']['enabled'] && !$config['system']['enabled'] && !$config['control_panel']['enabled']) {
+        outputError('No backup section is enabled');
+        $valid = false;
+    }
+    if (
+        $config['customers']['enabled'] && !$config['customers']['vhosts']['enabled']
+        && !$config['customers']['databases'] && !$config['customers']['logs']
+        && !$config['customers']['mails']
+    ) {
+        outputError('Customer backup has no enabled content');
+        $valid = false;
+    }
+
+    foreach (glob($projectDir . '/*.php') as $file) {
+        if (!validateTrustedFile($file, false)) {
+            $valid = false;
+        }
+    }
+    foreach (glob($projectDir . '/lib/*.php') as $file) {
+        if (!validateTrustedFile($file, false)) {
+            $valid = false;
+        }
+    }
+    $localConfig = $projectDir . '/config.local.php';
+    if (file_exists($localConfig) && !validateTrustedFile($localConfig, true)) {
+        $valid = false;
+    }
+
+    $excludeFiles = $config['customers']['vhosts']['exclude_files'] ?? null;
+    if (!is_array($excludeFiles)) {
+        outputError('customers.vhosts.exclude_files must be an array');
+        $valid = false;
+    } else {
+        foreach ($excludeFiles as $index => $excludeFile) {
+            if (!is_string($excludeFile) || !isValidExcludePath($excludeFile)) {
+                outputError('customers.vhosts.exclude_files contains an invalid path at index ' . $index);
+                $valid = false;
+            }
+        }
+    }
 
     // Backup directories writable (or creatable)
     if ($config['customers']['enabled']) {
         $dir = $config['customers']['dir'];
-        if (is_dir($dir) && !is_writable($dir)) {
-            outputError('Customers backup dir not writable: ' . $dir);
+        if (!is_string($dir) || !isCreatableBackupPath($dir)) {
+            outputError(
+                'Customer backup directory is unsafe or not writable.',
+                'Check customers.dir in config.local.php: use a dedicated absolute path with writable parents.'
+            );
             $valid = false;
         }
     }
 
+    if (
+        ($config['system']['enabled'] || $config['control_panel']['enabled'])
+        && (!is_string($config['system']['dir'] ?? null)
+            || !isCreatableBackupPath($config['system']['dir']))
+    ) {
+        outputError(
+            'System backup directory is unsafe or not writable.',
+            'Check system.dir in config.local.php: use a dedicated absolute path with writable parents.'
+        );
+        $valid = false;
+    }
+
     if ($config['system']['enabled']) {
-        if (empty($config['system']['file_list'])) {
-            outputWarn('System file list not configured — system backup will be skipped');
+        if (!is_string($config['system']['file_list'] ?? null) || $config['system']['file_list'] === '') {
+            outputError('System file list not configured');
+            $valid = false;
         } elseif (!file_exists($config['system']['file_list'])) {
-            outputWarn('System file list not found: ' . $config['system']['file_list'] . ' — system backup will be skipped');
+            outputError('System file list not found: ' . $config['system']['file_list']);
+            $valid = false;
+        } elseif (!validateTrustedFile($config['system']['file_list'], false)) {
+            $valid = false;
+        }
+        if (is_string($config['system']['file_list'] ?? null) && $config['system']['file_list'] !== '') {
+            $localFileList = $config['system']['file_list'] . '.local';
+            if (file_exists($localFileList) && !validateTrustedFile($localFileList, false)) {
+                $valid = false;
+            }
         }
     }
 
-    if ($config['control_panel']['enabled']) {
-        if (!is_dir($config['control_panel']['path'])) {
-            outputError('Control panel path not found: ' . $config['control_panel']['path']);
+    if ($config['control_panel']['enabled'] || $config['customers']['enabled']) {
+        if (
+            !is_string($config['control_panel']['path'] ?? null)
+            || !is_dir($config['control_panel']['path'])
+        ) {
+            outputError(
+                'Froxlor installation path does not exist or is not a directory.',
+                'Check control_panel.path in config.local.php.'
+            );
+            $valid = false;
+        } else {
+            if (!validateFroxlorInputs($config['control_panel']['path'])) {
+                $valid = false;
+            }
+            if (!isPhpFunctionAvailable('proc_open')) {
+                outputError(
+                    'CLI PHP cannot run the isolated Froxlor settings reader.',
+                    'Enable proc_open in the CLI PHP configuration and rerun --check-install.'
+                );
+                $valid = false;
+            }
+            if (
+                $config['control_panel']['enabled'] && is_string($config['system']['dir'] ?? null)
+                && !isDestinationOutsideSource($config['system']['dir'], $config['control_panel']['path'])
+            ) {
+                outputError('System backup destination overlaps control panel source');
+                $valid = false;
+            }
+        }
+        if (!extension_loaded('pdo_mysql')) {
+            outputError('PDO MySQL extension is required');
             $valid = false;
         }
     }
 
     // Required binaries
-    $method = $config['archive_method'];
-    if ($method === '7z' && find7zBinary() === '') {
+    $method = $config['archive_method'] ?? null;
+    $needsArchive = ($config['customers']['enabled']
+        && ($config['customers']['vhosts']['enabled'] || $config['customers']['logs']
+            || $config['customers']['mails'] || $config['customers']['databases']))
+        || $config['system']['enabled'] || $config['control_panel']['enabled'];
+    if ($needsArchive && $method === '7z' && find7zBinary() === '') {
         outputError('7-Zip not found. Install 7zip (apt install 7zip) or p7zip-full (apt install p7zip-full)');
+        $valid = false;
+    }
+    if ($needsArchive && $method === 'tar' && findBinary('tar') === '') {
+        outputError('tar not found');
         $valid = false;
     }
 
@@ -1085,8 +2365,42 @@ function validateConfig(array $config): bool
         outputError('mysqldump not found. Install mariadb-client or mysql-client');
         $valid = false;
     }
+    if ($needsMysqldump) {
+        $recoveryRoot = $projectDir . '/recovery';
+        if (file_exists($recoveryRoot) || is_link($recoveryRoot)) {
+            if (!ensureSecureRuntimeDirectory($recoveryRoot, false)) {
+                $valid = false;
+            }
+        } elseif (!is_writable($projectDir)) {
+            outputError('Application directory cannot create private database recovery files');
+            $valid = false;
+        }
+    }
 
     if ($config['rsync']['enabled']) {
+        $hostname = trim(gethostname()) ?: 'localhost';
+        if (
+            ($config['rsync']['path_customers'] === '' || $config['rsync']['path_system'] === '')
+            && preg_match('/^[A-Za-z0-9.-]+$/D', $hostname) !== 1
+        ) {
+            outputError('Hostname is unsafe for default rsync paths');
+            $valid = false;
+        }
+        if (
+            !is_string($config['rsync']['ssh_host'] ?? null)
+            || preg_match('/^[A-Za-z0-9_.@-]+$/D', $config['rsync']['ssh_host']) !== 1
+            || $config['rsync']['ssh_host'][0] === '-'
+        ) {
+            outputError('Invalid rsync SSH host alias');
+            $valid = false;
+        }
+        foreach (['path_customers', 'path_system'] as $key) {
+            $path = $config['rsync'][$key] ?? null;
+            if (!is_string($path) || ($path !== '' && !isSafeRemotePath($path))) {
+                outputError('Invalid rsync.' . $key);
+                $valid = false;
+            }
+        }
         if (findBinary('rsync') === '') {
             outputError('rsync not found. Install rsync (apt-get install rsync)');
             $valid = false;
@@ -1097,21 +2411,97 @@ function validateConfig(array $config): bool
         }
     }
 
-    if ($config['s3']['enabled'] && findBinary('s3cmd') === '') {
-        outputError('s3cmd not found. See http://s3tools.org/download');
-        $valid = false;
+    if ($config['s3']['enabled']) {
+        $hostname = trim(gethostname()) ?: 'localhost';
+        if (
+            ($config['s3']['path_customers'] === '' || $config['s3']['path_system'] === '')
+            && preg_match('/^[A-Za-z0-9.-]+$/D', $hostname) !== 1
+        ) {
+            outputError('Hostname is unsafe for default S3 paths');
+            $valid = false;
+        }
+        $needsBucket = ($config['customers']['enabled'] && ($config['s3']['path_customers'] ?? null) === '')
+            || (($config['system']['enabled'] || $config['control_panel']['enabled'])
+                && ($config['s3']['path_system'] ?? null) === '');
+        if (
+            $needsBucket && (!is_string($config['s3']['bucket'] ?? null)
+            || !isSafeS3Path($config['s3']['bucket']))
+        ) {
+            outputError('Invalid S3 bucket');
+            $valid = false;
+        }
+        foreach (['path_customers', 'path_system'] as $key) {
+            $path = $config['s3'][$key] ?? null;
+            if (!is_string($path) || ($path !== '' && !isSafeS3Path($path))) {
+                outputError('Invalid s3.' . $key);
+                $valid = false;
+            }
+        }
+        if (findBinary('s3cmd') === '') {
+            outputError('s3cmd not found. See http://s3tools.org/download');
+            $valid = false;
+        }
     }
 
     // SMTP config completeness
-    if ($config['email']['enabled']) {
+    if ($config['email']['enabled'] || $sendEmail) {
+        if (!isPhpFunctionAvailable('stream_socket_client')) {
+            outputError('CLI PHP stream socket support is required for SMTP reports.');
+            $valid = false;
+        }
         foreach (['host', 'user', 'password'] as $key) {
-            if (empty($config['email']['smtp'][$key])) {
+            if (
+                !is_string($config['email']['smtp'][$key] ?? null)
+                || $config['email']['smtp'][$key] === ''
+            ) {
                 outputError('Email enabled but smtp.' . $key . ' is empty');
                 $valid = false;
             }
         }
-        if (empty($config['email']['from']) || empty($config['email']['to'])) {
+        $smtp = $config['email']['smtp'];
+        if (
+            !is_string($smtp['host'] ?? null)
+            || preg_match('/^[A-Za-z0-9.-]+$/D', $smtp['host']) !== 1
+            || !is_int($smtp['port'] ?? null) || $smtp['port'] < 1 || $smtp['port'] > 65535
+        ) {
+            outputError('Invalid SMTP host or port');
+            $valid = false;
+        }
+        if (
+            !is_string($config['email']['from'] ?? null) || !is_string($config['email']['to'] ?? null)
+            || $config['email']['from'] === '' || $config['email']['to'] === ''
+        ) {
             outputError('Email enabled but from/to address is empty');
+            $valid = false;
+        } elseif (!isValidEmailAddress($config['email']['from']) || !isValidEmailAddress($config['email']['to'])) {
+            outputError('Email from/to address is invalid');
+            $valid = false;
+        }
+        if (
+            !is_string($config['email']['subject'] ?? null)
+            || !isValidHeaderValue($config['email']['subject'])
+            || strlen($config['email']['subject']) > 200
+            || preg_match('//u', $config['email']['subject']) !== 1
+        ) {
+            outputError('Email subject contains an invalid header character');
+            $valid = false;
+        } else {
+            $rendered = str_replace(
+                ['{hostname}', '{date}'],
+                [trim(gethostname()) ?: 'localhost', date('Y-m-d')],
+                $config['email']['subject']
+            );
+            if (!isValidHeaderValue($rendered) || strlen($rendered) > 240) {
+                outputError('Rendered email subject is invalid or too long');
+                $valid = false;
+            }
+        }
+        if (!in_array($config['email']['smtp']['encryption'] ?? 'tls', ['tls', 'ssl', ''], true)) {
+            outputError('Email smtp.encryption must be tls, ssl, or empty');
+            $valid = false;
+        }
+        if (($smtp['encryption'] ?? 'tls') !== '' && !extension_loaded('openssl')) {
+            outputError('OpenSSL extension is required for encrypted SMTP');
             $valid = false;
         }
     }
@@ -1119,9 +2509,428 @@ function validateConfig(array $config): bool
     return $valid;
 }
 
+/**
+ * Validate a trusted input file
+ *
+ * @param string  $path   Input path
+ * @param boolean $secret Whether the file contains secrets
+ *
+ * @return boolean
+ */
+function validateTrustedFile(string $path, bool $secret): bool
+{
+    if (is_link($path) || !is_file($path)) {
+        outputError(
+            'Backup input is missing, not a regular file, or is a symlink: ' . $path,
+            'Check the backup installation path and replace symlinks with regular files.'
+        );
+        return false;
+    }
+    $permissions = fileperms($path);
+    $forbidden = $secret ? 0077 : 0022;
+    if ($permissions === false || ($permissions & $forbidden) !== 0) {
+        outputError(
+            'Backup input permissions are unsafe: ' . $path,
+            $secret ? 'Set this backup configuration file to mode 0600 or stricter.' : 'Remove group and other write permissions from this backup input.'
+        );
+        return false;
+    }
+    if (isRootProcess() && fileowner($path) !== 0) {
+        outputError(
+            'Backup input must be root-owned when backup runs as root: ' . $path,
+            'Check who owns this backup file; do not change Froxlor application file ownership.'
+        );
+        return false;
+    }
+    $parent = dirname($path);
+    while ($parent !== dirname($parent)) {
+        if (
+            is_link($parent) || !is_dir($parent) || (fileperms($parent) & 0022) !== 0
+            || (isRootProcess() && fileowner($parent) !== 0)
+        ) {
+            outputError(
+                'Backup input parent directory is unsafe: ' . $parent,
+                'Check for symlinks, group/other write access, and root ownership when running as root.'
+            );
+            return false;
+        }
+        $parent = dirname($parent);
+    }
+
+    return true;
+}
+
+/**
+ * Check Froxlor PHP inputs for loading under their owner account
+ *
+ * @param string $panelPath Froxlor installation path
+ *
+ * @return boolean
+ */
+function validateFroxlorInputs(string $panelPath): bool
+{
+    $userdata = $panelPath . '/lib/userdata.inc.php';
+    $tables = $panelPath . '/lib/tables.inc.php';
+    foreach ([$userdata, $tables] as $path) {
+        if (is_link($path) || !is_file($path) || !is_readable($path)) {
+            outputError(
+                'Cannot read a regular Froxlor settings file: ' . $path,
+                'Check that it exists, is not a symlink, and is readable by the backup process.'
+            );
+            return false;
+        }
+    }
+    $owner = fileowner($userdata);
+    $tableOwner = fileowner($tables);
+    if ($owner === false || $tableOwner === false || ($tableOwner !== $owner && $tableOwner !== 0)) {
+        outputError(
+            'Froxlor settings files have incompatible owners: ' . $userdata . ' and ' . $tables,
+            'Check their ownership against the Froxlor installation; the table file may also be root-owned.'
+        );
+        return false;
+    }
+    if ($owner === 0) {
+        return validateTrustedFile($userdata, false) && validateTrustedFile($tables, false);
+    }
+    if (posix_geteuid() !== $owner && !isRootProcess()) {
+        outputError(
+            'The backup process cannot read Froxlor settings as their owner.',
+            'Run the backup as root or as the owner of ' . $userdata . '.'
+        );
+        return false;
+    }
+    if (isRootProcess()) {
+        $account = posix_getpwuid($owner);
+        if ($account === false || !isset($account['name']) || findRunuserBinary() === '') {
+            outputError(
+                'Cannot switch to the Froxlor settings owner.',
+                'Check that the owner has a system account and that root-owned runuser is installed.'
+            );
+            return false;
+        }
+    }
+
+    return true;
+}
+
+/**
+ * Find a root-owned runuser executable outside a caller-controlled PATH
+ *
+ * @return string Absolute executable path, or empty string
+ */
+function findRunuserBinary(): string
+{
+    foreach (['/usr/sbin/runuser', '/usr/bin/runuser', '/sbin/runuser', '/bin/runuser'] as $candidate) {
+        $path = realpath($candidate);
+        if (
+            $path !== false && is_file($path) && is_executable($path)
+            && fileowner($path) === 0 && (fileperms($path) & 0022) === 0
+        ) {
+            return $path;
+        }
+    }
+
+    return '';
+}
+
+/**
+ * Read Froxlor connection settings and table names outside the root PHP process
+ *
+ * @param string $panelPath Froxlor installation path
+ *
+ * @return array|null Connection settings and table names, or null on failure
+ */
+function loadFroxlorSettings(string $panelPath): ?array
+{
+    if (!validateFroxlorInputs($panelPath)) {
+        return null;
+    }
+    if (!function_exists('proc_open')) {
+        outputError(
+            'PHP cannot start the Froxlor settings reader.',
+            'Enable proc_open in the CLI PHP configuration and rerun --check-install.'
+        );
+        return null;
+    }
+    $userdata = $panelPath . '/lib/userdata.inc.php';
+    $owner = fileowner($userdata);
+    $command = [PHP_BINARY, '-n', '-d', 'display_errors=0', '-d', 'log_errors=0', '-r', froxlorReaderCode(), $panelPath];
+    if (isRootProcess() && $owner !== 0) {
+        $account = posix_getpwuid($owner);
+        $command = array_merge([findRunuserBinary(), '-u', $account['name'], '--'], $command);
+    }
+    $descriptors = [
+        0 => ['pipe', 'r'],
+        1 => ['pipe', 'w'],
+        2 => ['file', '/dev/null', 'w'],
+    ];
+    $process = proc_open($command, $descriptors, $pipes, '/', ['PATH' => '/usr/sbin:/usr/bin:/sbin:/bin', 'LANG' => 'C']);
+    if (!is_resource($process)) {
+        outputError(
+            'Cannot launch the Froxlor settings reader.',
+            'Check CLI PHP proc_open and the Froxlor owner account, then rerun --check-install.'
+        );
+        return null;
+    }
+    fclose($pipes[0]);
+    $json = stream_get_contents($pipes[1], 1048577);
+    fclose($pipes[1]);
+    if ($json === false || strlen($json) > 1048576) {
+        proc_terminate($process);
+        proc_close($process);
+        outputError(
+            'Froxlor settings reader returned too much data.',
+            'Inspect the Froxlor settings files for unexpected output or oversized values.'
+        );
+        return null;
+    }
+    $exitCode = proc_close($process);
+    if ($exitCode !== 0) {
+        outputError(
+            'Froxlor settings reader failed (exit code ' . $exitCode . ').',
+            'Check Froxlor settings file readability and PHP syntax as the Froxlor file owner.'
+        );
+        return null;
+    }
+    $settings = json_decode($json, true);
+    if (
+        !is_array($settings) || !is_array($settings['sql'] ?? null)
+        || !is_array($settings['sql_root'][0] ?? null) || !is_array($settings['tables'] ?? null)
+    ) {
+        outputError(
+            'Froxlor settings reader did not return the required database settings and table names.',
+            'Check the Froxlor settings files for missing or unsupported values.'
+        );
+        return null;
+    }
+    foreach (['host', 'db', 'user', 'password'] as $key) {
+        if (!is_string($settings['sql'][$key] ?? null)) {
+            outputError('Froxlor database setting is invalid: ' . $key);
+            return null;
+        }
+    }
+    foreach (['host', 'user', 'password'] as $key) {
+        if (!is_string($settings['sql_root'][0][$key] ?? null)) {
+            outputError('Froxlor privileged database setting is invalid: ' . $key);
+            return null;
+        }
+    }
+    $tableNames = ['TABLE_PANEL_CUSTOMERS', 'TABLE_PANEL_DOMAINS', 'TABLE_PANEL_DATABASES', 'TABLE_PANEL_SETTINGS', 'TABLE_MAIL_USERS'];
+    foreach ($tableNames as $name) {
+        $table = $settings['tables'][$name] ?? null;
+        if (!is_string($table) || preg_match('/^[A-Za-z_][A-Za-z0-9_]*$/D', $table) !== 1) {
+            outputError('Froxlor table name is invalid: ' . $name);
+            return null;
+        }
+        if (defined($name) && constant($name) !== $table) {
+            outputError('Froxlor table name conflicts with an existing constant: ' . $name);
+            return null;
+        }
+    }
+    foreach ($tableNames as $name) {
+        if (!defined($name)) {
+            define($name, $settings['tables'][$name]);
+        }
+    }
+
+    return $settings;
+}
+
+/**
+ * Return the isolated Froxlor settings reader program
+ *
+ * @return string
+ */
+function froxlorReaderCode(): string
+{
+    return <<<'PHP'
+$panelPath = $argv[1];
+require $panelPath . '/lib/userdata.inc.php';
+require $panelPath . '/lib/tables.inc.php';
+$tables = [];
+foreach (['TABLE_PANEL_CUSTOMERS', 'TABLE_PANEL_DOMAINS', 'TABLE_PANEL_DATABASES', 'TABLE_PANEL_SETTINGS', 'TABLE_MAIL_USERS'] as $name) {
+    if (!defined($name)) {
+        exit(2);
+    }
+    $tables[$name] = constant($name);
+}
+echo json_encode(['sql' => $sql ?? null, 'sql_root' => $sql_root ?? null, 'tables' => $tables], JSON_THROW_ON_ERROR);
+PHP;
+}
+
+/**
+ * Check whether the process runs as root
+ *
+ * @return boolean
+ */
+function isRootProcess(): bool
+{
+    return function_exists('posix_geteuid') && posix_geteuid() === 0;
+}
+
+/**
+ * Validate an email header address
+ *
+ * @param string $value Email address
+ *
+ * @return boolean
+ */
+function isValidEmailAddress(string $value): bool
+{
+    return isValidHeaderValue($value) && filter_var($value, FILTER_VALIDATE_EMAIL) !== false;
+}
+
+/**
+ * Validate a mail header value
+ *
+ * @param string $value Header value
+ *
+ * @return boolean
+ */
+function isValidHeaderValue(string $value): bool
+{
+    return preg_match('/[\x00-\x1f\x7f]/', $value) !== 1;
+}
+
+/**
+ * Validate a relative vhost exclusion path
+ *
+ * @param string $path Exclusion path
+ *
+ * @return boolean
+ */
+function isValidExcludePath(string $path): bool
+{
+    if ($path === '' || strpos($path, "\0") !== false) {
+        return false;
+    }
+
+    foreach (explode('/', $path) as $component) {
+        if ($component === '' || $component === '.' || $component === '..') {
+            return false;
+        }
+    }
+
+    return true;
+}
+
 // =============================================================================
 // SMTP
 // =============================================================================
+
+/**
+ * Read a complete SMTP reply, including continuation lines
+ *
+ * @param resource $socket SMTP stream
+ *
+ * @return integer|null Reply code or null on protocol/I/O failure
+ */
+function smtpReadReply($socket): ?int
+{
+    $expected = null;
+    for ($lineCount = 0; $lineCount < 100; $lineCount++) {
+        $line = fgets($socket, 512);
+        if ($line === false || preg_match('/^([0-9]{3})([ -])/', $line, $matches) !== 1) {
+            return null;
+        }
+        $code = (int) $matches[1];
+        if ($expected !== null && $expected !== $code) {
+            return null;
+        }
+        $expected = $code;
+        if ($matches[2] === ' ') {
+            return $code;
+        }
+    }
+
+    return null;
+}
+
+/**
+ * Write all bytes to a stream, including partial writes
+ *
+ * @param resource $socket Writable stream
+ * @param string   $data   Bytes to send
+ *
+ * @return boolean
+ */
+function writeAllStream($socket, string $data): bool
+{
+    $offset = 0;
+    $length = strlen($data);
+    while ($offset < $length) {
+        $written = fwrite($socket, substr($data, $offset, 8192));
+        if ($written === false || $written === 0) {
+            return false;
+        }
+        $offset += $written;
+    }
+
+    return true;
+}
+
+/**
+ * Send a command and read its complete reply
+ *
+ * @param resource $socket  SMTP stream
+ * @param string   $command SMTP command
+ *
+ * @return integer|null
+ */
+function smtpCommand($socket, string $command): ?int
+{
+    return writeAllStream($socket, $command . "\r\n") ? smtpReadReply($socket) : null;
+}
+
+/**
+ * Encode non-ASCII header text as folded UTF-8 encoded words
+ *
+ * @param string $value Header text
+ *
+ * @return string
+ */
+function smtpHeaderText(string $value): string
+{
+    if (preg_match('/^[\x20-\x7e]*$/D', $value) === 1) {
+        return $value;
+    }
+    $characters = preg_split('//u', $value, -1, PREG_SPLIT_NO_EMPTY);
+    if ($characters === false) {
+        throw new \RuntimeException('Invalid UTF-8 in SMTP subject');
+    }
+    $chunks = [];
+    $chunk = '';
+    foreach ($characters as $character) {
+        if (strlen($chunk . $character) > 36) {
+            $chunks[] = '=?UTF-8?B?' . base64_encode($chunk) . '?=';
+            $chunk = '';
+        }
+        $chunk .= $character;
+    }
+    if ($chunk !== '') {
+        $chunks[] = '=?UTF-8?B?' . base64_encode($chunk) . '?=';
+    }
+
+    return implode("\r\n ", $chunks);
+}
+
+/**
+ * Extract the backup summary for email previews
+ *
+ * @param string $body Buffered report
+ *
+ * @return string Summary, or empty when absent
+ */
+function reportPreheader(string $body): string
+{
+    foreach (explode("\n", $body) as $line) {
+        if (strpos($line, '] Success:') !== false || strpos($line, '] Errors:') !== false) {
+            return trim(preg_replace('/^\[\d{2}:\d{2}:\d{2}\]\s*/', '', $line));
+        }
+    }
+
+    return '';
+}
 
 /**
  * Wrap plain-text backup log in a minimal responsive HTML email template
@@ -1191,14 +3000,7 @@ function wrapEmailHtml(string $plainBody, bool $hasErrors): string
             . 'font-size:12px;color:#333;white-space:pre-wrap;">' . $line . '</td></tr>';
     }
 
-    // Extract summary line for the preheader (shown in notification previews)
-    $preheader = $statusLabel;
-    foreach (explode("\n", $plainBody) as $preheaderLine) {
-        if (strpos($preheaderLine, '] Success:') !== false || strpos($preheaderLine, '] Errors:') !== false) {
-            $preheader = trim(preg_replace('/^\[\d{2}:\d{2}:\d{2}\]\s*/', '', $preheaderLine));
-            break;
-        }
-    }
+    $preheader = reportPreheader($plainBody) ?: $statusLabel;
 
     $preheaderHtml = '<div style="display:none;max-height:0;overflow:hidden;mso-hide:all;">'
         . htmlspecialchars($preheader, ENT_QUOTES, 'UTF-8')
@@ -1252,69 +3054,80 @@ function wrapEmailHtml(string $plainBody, bool $hasErrors): string
  */
 function smtpSend(array $smtpConfig, string $from, string $to, string $subject, string $body): bool
 {
+    if (
+        !isValidEmailAddress($from) || !isValidEmailAddress($to)
+        || !isValidHeaderValue($subject) || strlen($subject) > 256
+    ) {
+        outputError('Invalid SMTP address or subject');
+        return false;
+    }
     $host       = $smtpConfig['host'];
     $port       = (int) $smtpConfig['port'];
     $user       = $smtpConfig['user'];
     $password   = $smtpConfig['password'];
     $encryption = $smtpConfig['encryption'] ?? 'tls';
 
-    // Connect
-    $prefix = ($encryption === 'ssl') ? 'ssl://' : '';
-    $socket = @fsockopen($prefix . $host, $port, $errno, $errstr, 30);
+    $context = stream_context_create([
+        'ssl' => [
+            'verify_peer'      => true,
+            'verify_peer_name' => true,
+            'peer_name'        => $host,
+            'allow_self_signed' => false,
+        ],
+    ]);
+    $transport = ($encryption === 'ssl') ? 'tls://' : 'tcp://';
+    $socket = @stream_socket_client(
+        $transport . $host . ':' . $port,
+        $errno,
+        $errstr,
+        30,
+        STREAM_CLIENT_CONNECT,
+        $context
+    );
     if (!$socket) {
         outputError('SMTP connect failed: ' . $errstr);
         return false;
     }
-
-    // Send a command, read one response line, return the numeric code
-    $sendCmd = function (string $cmd) use ($socket): int {
-        fwrite($socket, $cmd . "\r\n");
-
-        return (int) substr(fgets($socket, 512), 0, 3);
-    };
-
-    // Read one response line, return the numeric code
-    $readCode = function () use ($socket): int {
-        return (int) substr(fgets($socket, 512), 0, 3);
-    };
-
-    // Consume remaining lines of a multi-line response, return final code
-    $drainMulti = function () use ($socket): int {
-        $code = 0;
-        while (($line = fgets($socket, 512)) !== false) {
-            $code = (int) substr($line, 0, 3);
-            if (substr($line, 3, 1) !== '-') {
-                break;
-            }
-        }
-
-        return $code;
-    };
-
-    // Read greeting
-    $readCode();
-
-    // EHLO
-    $sendCmd('EHLO ' . gethostname());
-    $drainMulti();
+    stream_set_timeout($socket, 30);
+    $identity = trim(gethostname()) ?: 'localhost';
+    if (preg_match('/^[A-Za-z0-9.-]+$/D', $identity) !== 1) {
+        $identity = 'localhost';
+    }
+    if (smtpReadReply($socket) !== 220 || smtpCommand($socket, 'EHLO ' . $identity) !== 250) {
+        outputError('SMTP greeting or EHLO failed');
+        fclose($socket);
+        return false;
+    }
 
     // STARTTLS upgrade
     if ($encryption === 'tls') {
-        $code = $sendCmd('STARTTLS');
+        $code = smtpCommand($socket, 'STARTTLS');
         if ($code !== 220) {
             outputError('SMTP STARTTLS failed (' . $code . ')');
             fclose($socket);
             return false;
         }
-        stream_socket_enable_crypto($socket, true, STREAM_CRYPTO_METHOD_TLS_CLIENT);
-        $sendCmd('EHLO ' . gethostname());
-        $drainMulti();
+        if (stream_socket_enable_crypto($socket, true, STREAM_CRYPTO_METHOD_TLS_CLIENT) !== true) {
+            outputError('SMTP TLS negotiation failed');
+            fclose($socket);
+            return false;
+        }
+        if (smtpCommand($socket, 'EHLO ' . $identity) !== 250) {
+            outputError('SMTP EHLO after TLS failed');
+            fclose($socket);
+            return false;
+        }
     }
 
-    // AUTH LOGIN
-    $sendCmd('AUTH LOGIN');
-    $sendCmd(base64_encode($user));
-    $code = $sendCmd(base64_encode($password));
+    if (
+        smtpCommand($socket, 'AUTH LOGIN') !== 334
+        || smtpCommand($socket, base64_encode($user)) !== 334
+    ) {
+        outputError('SMTP authentication challenge failed');
+        fclose($socket);
+        return false;
+    }
+    $code = smtpCommand($socket, base64_encode($password));
     if ($code !== 235) {
         outputError('SMTP authentication failed (' . $code . ') -- check user/password');
         fclose($socket);
@@ -1322,19 +3135,19 @@ function smtpSend(array $smtpConfig, string $from, string $to, string $subject, 
     }
 
     // Envelope
-    $code = $sendCmd('MAIL FROM:<' . $from . '>');
+    $code = smtpCommand($socket, 'MAIL FROM:<' . $from . '>');
     if ($code !== 250) {
         outputError('SMTP MAIL FROM rejected (' . $code . ')');
         fclose($socket);
         return false;
     }
-    $code = $sendCmd('RCPT TO:<' . $to . '>');
+    $code = smtpCommand($socket, 'RCPT TO:<' . $to . '>');
     if ($code !== 250) {
         outputError('SMTP RCPT TO rejected (' . $code . ')');
         fclose($socket);
         return false;
     }
-    $code = $sendCmd('DATA');
+    $code = smtpCommand($socket, 'DATA');
     if ($code !== 354) {
         outputError('SMTP DATA rejected (' . $code . ')');
         fclose($socket);
@@ -1345,48 +3158,42 @@ function smtpSend(array $smtpConfig, string $from, string $to, string $subject, 
     $boundary = 'bp_' . md5(uniqid('', true));
     $htmlBody = wrapEmailHtml($body, outputHasErrors());
 
-    // Prepend a plain-text preheader so notification previews (Thunderbird, etc.)
-    // show the summary instead of the first dashes separator line
-    $plainPreheader = '';
-    foreach (explode("\n", $body) as $preheaderLine) {
-        if (strpos($preheaderLine, '] Success:') !== false || strpos($preheaderLine, '] Errors:') !== false) {
-            $plainPreheader = trim(preg_replace('/^\[\d{2}:\d{2}:\d{2}\]\s*/', '', $preheaderLine)) . "\n\n";
-            break;
-        }
-    }
+    $plainPreheader = reportPreheader($body);
+    $plainPreheader = $plainPreheader !== '' ? $plainPreheader . "\n\n" : '';
     $plainBody = $plainPreheader . $body;
-
-    // Dot-stuff: lines beginning with '.' must be escaped as '..' per RFC 5321
-    $dotStuff = function (string $text): string {
-        return preg_replace('/^\.$/m', '..', preg_replace('/^\./m', '..', $text));
-    };
 
     $date    = date('r');
     $message = 'Date: ' . $date . "\r\n"
         . 'From: ' . $from . "\r\n"
         . 'To: ' . $to . "\r\n"
-        . 'Subject: ' . $subject . "\r\n"
+        . 'Subject: ' . smtpHeaderText($subject) . "\r\n"
         . 'MIME-Version: 1.0' . "\r\n"
         . 'Content-Type: multipart/alternative; boundary="' . $boundary . '"' . "\r\n"
         . "\r\n"
         . '--' . $boundary . "\r\n"
         . 'Content-Type: text/plain; charset=UTF-8' . "\r\n"
+        . 'Content-Transfer-Encoding: base64' . "\r\n"
         . "\r\n"
-        . $dotStuff($plainBody) . "\r\n"
+        . chunk_split(base64_encode($plainBody), 76, "\r\n")
         . '--' . $boundary . "\r\n"
         . 'Content-Type: text/html; charset=UTF-8' . "\r\n"
+        . 'Content-Transfer-Encoding: base64' . "\r\n"
         . "\r\n"
-        . $dotStuff($htmlBody) . "\r\n"
+        . chunk_split(base64_encode($htmlBody), 76, "\r\n")
         . '--' . $boundary . '--';
-    fwrite($socket, $message . "\r\n.\r\n");
-    $code = $readCode();
+    if (!writeAllStream($socket, $message . "\r\n.\r\n")) {
+        outputError('SMTP message write failed');
+        fclose($socket);
+        return false;
+    }
+    $code = smtpReadReply($socket);
     if ($code !== 250) {
         outputError('SMTP message rejected (' . $code . ')');
         fclose($socket);
         return false;
     }
 
-    fwrite($socket, 'QUIT' . "\r\n");
+    writeAllStream($socket, 'QUIT' . "\r\n");
     fclose($socket);
 
     return true;
