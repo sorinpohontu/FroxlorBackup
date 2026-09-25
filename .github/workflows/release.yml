@@ -1,0 +1,147 @@
+name: Publish release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  RELEASE_FILES: >-
+    backup.php config.php lib/BackupHelpers.php lib/BackupSteps.php
+    system-file-list README.md CHANGELOG.md LICENSE
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    outputs:
+      changed: ${{ steps.release-files.outputs.changed }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check release tag and packaged changes
+        id: release-files
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          version_pattern='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
+          if [[ ! "$RELEASE_TAG" =~ $version_pattern ]]; then
+            echo 'Release tag must use vMAJOR.MINOR.PATCH.' >&2
+            exit 1
+          fi
+          if [[ "$(git rev-parse "refs/tags/${RELEASE_TAG}^{commit}")" != "$GITHUB_SHA" ]]; then
+            echo 'Release tag does not point to the triggering commit.' >&2
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo 'Release tag must point to a commit on main.' >&2
+            exit 1
+          fi
+
+          tags=()
+          while IFS= read -r tag; do
+            if [[ "$tag" =~ $version_pattern ]]; then
+              tags+=("$tag")
+            fi
+          done < <(git tag --list 'v*' --sort=-version:refname)
+          if [[ "${tags[0]:-}" != "$RELEASE_TAG" ]]; then
+            echo 'Release tag must be the highest version tag.' >&2
+            exit 1
+          fi
+
+          previous_tag="${tags[1]:-}"
+          if [[ -n "$previous_tag" ]]; then
+            if ! git merge-base --is-ancestor "$previous_tag" "$GITHUB_SHA"; then
+              echo 'Previous release tag is not an ancestor of this release.' >&2
+              exit 1
+            fi
+            read -r -a files <<< "$RELEASE_FILES"
+            if git diff --quiet "$previous_tag" "$GITHUB_SHA" -- "${files[@]}"; then
+              echo 'No packaged files changed since the previous version tag.'
+              echo 'changed=false' >> "$GITHUB_OUTPUT"
+              exit 0
+            else
+              diff_status=$?
+              if [[ "$diff_status" -ne 1 ]]; then
+                echo 'Could not compare packaged files.' >&2
+                exit "$diff_status"
+              fi
+            fi
+          fi
+
+          echo 'changed=true' >> "$GITHUB_OUTPUT"
+
+  debian-check:
+    needs: verify
+    if: needs.verify.outputs.changed == 'true'
+    runs-on: ubuntu-24.04
+    container: debian:${{ matrix.release }}-slim
+    strategy:
+      matrix:
+        release: ['12', '13']
+    steps:
+      - name: Install Debian test tools
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends ca-certificates git gzip php-cli tar util-linux
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Check PHP syntax and smoke fixtures
+        run: |
+          php -l backup.php
+          php -l config.php
+          php -l lib/BackupHelpers.php
+          php -l lib/BackupSteps.php
+          php -l tests/ReviewSmoke.php
+          php backup.php --help > /dev/null
+          runuser -u nobody -- php tests/ReviewSmoke.php
+
+  publish:
+    needs: [verify, debian-check]
+    if: needs.verify.outputs.changed == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Build and verify deployment archive
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          read -r -a files <<< "$RELEASE_FILES"
+          archive="FroxlorBackup-${RELEASE_TAG}.tar.gz"
+          git archive --format=tar --prefix=FroxlorBackup/ "$GITHUB_SHA" -- "${files[@]}" | gzip -n > "$archive"
+          diff -u \
+            <(printf 'FroxlorBackup/%s\n' "${files[@]}" | sort) \
+            <(tar -tzf "$archive" | sed '/\/$/d' | sort)
+          sha256sum "$archive" > "${archive}.sha256"
+
+      - name: Publish GitHub release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          archive="FroxlorBackup-${RELEASE_TAG}.tar.gz"
+          gh release create "$RELEASE_TAG" "$archive" "${archive}.sha256" \
+            --verify-tag --generate-notes --title "$RELEASE_TAG"
