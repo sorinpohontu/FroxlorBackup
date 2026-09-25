@@ -59,6 +59,13 @@ phpcbf --standard=ruleset.xml .
 
 ## Development Environment & Constraints
 
+### Git Approval
+
+Do not create commits or push branches or tags without the user's express approval
+for that specific action. Approval of a plan, code change, or release version does
+not imply approval to commit or push. Leave changes uncommitted and local tags
+unpublished unless the user explicitly authorizes the next Git action.
+
 ### Remote Development Server
 
 **IMPORTANT**: Source edits and static checks run locally, but real backup behavior must be tested on a disposable target or the remote development server.
