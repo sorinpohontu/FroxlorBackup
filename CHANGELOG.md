@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2.1.0] - 2026-10-05
+
+### Added
+- Optional atomic success stamp via `status_file` for monitoring backup age
+
+---
+
 ## [2.0.0] - 2026-09-24
 
 ### Added

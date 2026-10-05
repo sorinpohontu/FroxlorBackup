@@ -111,6 +111,15 @@ return [
 
 Set `archive_method` to `'7z'` (default, produces `.7z`) or `'tar'` (produces `.tar.gz`). Applies to all backup sections.
 
+### Backup success status
+
+Set `status_file` to an absolute path such as `/var/lib/froxlor-backup/last-success`
+to monitor the last successful backup; `''` disables it.
+Successful normal runs create missing parent directories (`0700`) and atomically update the stamp
+(`0600`). Use a trusted path outside backup destinations.
+Dry runs and installation checks create nothing.
+Backup errors preserve the previous stamp, and SMTP failures do not undo it.
+
 ### Vhost file exclusions
 
 `customers.vhosts.exclude_files` omits paths from every vhost document-root archive. Entries are relative paths, may name either a file, a directory, or an archive-native glob such as `system/storage/logs/*log`. A directory entry omits all of its descendants. It does not affect system, mail, database, GoAccess, or control-panel backups.

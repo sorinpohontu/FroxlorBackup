@@ -9,7 +9,7 @@
  * @copyright   2026 Frontline softworks <https://www.frontline.ro>
  * @license     https://opensource.org/licenses/BSD-3-Clause
  *
- * @since       2026.09.25
+ * @since       2026.10.05
  */
 
 // =============================================================================
@@ -427,6 +427,157 @@ function isCreatableBackupPath(string $path): bool
 
     return is_dir($path) && is_writable($path) && !is_link($path)
         && (fileperms($path) & 0022) === 0;
+}
+
+/**
+ * Validate a success-stamp path without changing files
+ *
+ * @param string   $path        Stamp path, or empty to disable
+ * @param string[] $backupRoots Backup destinations
+ *
+ * @return boolean False records an output error
+ */
+function validateStatusFile(string $path, array $backupRoots): bool
+{
+    if ($path === '') {
+        return true;
+    }
+    if ($path[0] !== '/' || preg_match('/[\x00-\x1f\x7f]/', $path) === 1) {
+        outputError('status_file must be an absolute path without control characters');
+
+        return false;
+    }
+    foreach (explode('/', substr($path, 1)) as $component) {
+        if ($component === '' || $component === '.' || $component === '..') {
+            outputError('status_file contains an invalid path component');
+
+            return false;
+        }
+    }
+    foreach ($backupRoots as $root) {
+        if ($path === rtrim($root, '/') || strpos($path, rtrim($root, '/') . '/') === 0) {
+            outputError('status_file must be outside backup destinations: ' . $path);
+
+            return false;
+        }
+    }
+
+    clearstatcache();
+    if (is_link($path) || (file_exists($path) && !is_file($path))) {
+        outputError('status_file must be a regular file or a missing file: ' . $path);
+
+        return false;
+    }
+    if (file_exists($path)) {
+        $permissions = @fileperms($path);
+        if ($permissions === false || ($permissions & 0022) !== 0 || fileowner($path) !== posix_geteuid()) {
+            outputError('status_file must belong to the backup user and not allow group/other writes: ' . $path);
+
+            return false;
+        }
+    }
+    $parent = dirname($path);
+    while (!file_exists($parent) && !is_link($parent)) {
+        $parent = dirname($parent);
+    }
+    if (!is_dir($parent) || !is_writable($parent)) {
+        outputError('status_file directory must be writable or safely creatable: ' . dirname($path));
+
+        return false;
+    }
+    while (true) {
+        $permissions = @fileperms($parent);
+        if (
+            is_link($parent) || !is_dir($parent) || $permissions === false
+            || ($permissions & 0022) !== 0 || (isRootProcess() && fileowner($parent) !== 0)
+        ) {
+            outputError('Unsafe status_file parent directory: ' . $parent);
+
+            return false;
+        }
+        $next = dirname($parent);
+        if ($next === $parent) {
+            break;
+        }
+        $parent = $next;
+    }
+
+    return true;
+}
+
+/**
+ * Atomically publish a timestamp after a successful backup
+ *
+ * @param string   $path        Stamp path
+ * @param string[] $backupRoots Backup destinations
+ *
+ * @return boolean False records an error and preserves the previous stamp
+ */
+function writeSuccessStamp(string $path, array $backupRoots): bool
+{
+    if ($path === '' || !validateStatusFile($path, $backupRoots)) {
+        return $path === '';
+    }
+    $temporaryFile = '';
+    $fp = null;
+    $created = false;
+    $published = false;
+    try {
+        $directory = dirname($path);
+        if (!is_dir($directory) && !@mkdir($directory, 0700, true) && !is_dir($directory)) {
+            outputError('Cannot create success-stamp directory: ' . $directory);
+
+            return false;
+        }
+        if (!validateStatusFile($path, $backupRoots)) {
+            return false;
+        }
+        $temporaryFile = dirname($path) . '/.' . basename($path) . '.success-' . bin2hex(random_bytes(16));
+        $fp = @fopen($temporaryFile, 'xb');
+        if ($fp === false) {
+            outputError('Cannot create temporary success stamp: ' . $path);
+
+            return false;
+        }
+        $created = true;
+        if (!@chmod($temporaryFile, 0600)) {
+            outputError('Cannot restrict success-stamp permissions: ' . $path);
+
+            return false;
+        }
+        $stamp = date('c') . PHP_EOL;
+        $written = @fwrite($fp, $stamp);
+        $flushed = @fflush($fp);
+        $closed = @fclose($fp);
+        $fp = null;
+        if ($written !== strlen($stamp) || !$flushed || !$closed) {
+            outputError('Cannot write complete success stamp: ' . $path);
+
+            return false;
+        }
+        if (!validateStatusFile($path, $backupRoots)) {
+            return false;
+        }
+        if (!@rename($temporaryFile, $path)) {
+            outputError('Cannot publish success stamp: ' . $path);
+
+            return false;
+        }
+        $published = true;
+
+        return true;
+    } catch (\Throwable $error) {
+        outputError('Success stamp failed: ' . $error->getMessage());
+
+        return false;
+    } finally {
+        if (is_resource($fp)) {
+            @fclose($fp);
+        }
+        if ($created && !$published && !@unlink($temporaryFile)) {
+            outputError('Cannot remove temporary success stamp: ' . $temporaryFile);
+        }
+    }
 }
 
 /**
@@ -2118,6 +2269,13 @@ function installationCheckLines(array $config, bool $sendEmail = false): array
     }
     $tools = requiredToolLabels($config);
     $lines[] = 'Enabled tools: ' . ($tools ? implode(', ', $tools) : 'none');
+    $statusFile = $config['status_file'];
+    if ($statusFile === '') {
+        $lines[] = 'Backup success status: disabled';
+    } else {
+        $directoryStatus = is_dir(dirname($statusFile)) ? 'writable' : 'can be created';
+        $lines[] = 'Backup success status: ' . $statusFile . ' (directory ' . $directoryStatus . ')';
+    }
 
     return $lines;
 }
@@ -2169,6 +2327,17 @@ function validateConfig(array $config, bool $sendEmail = false): bool
     }
     if (!is_string($config['timezone'] ?? null) || resolveTimezone($config['timezone']) === null) {
         outputError('Invalid timezone. Use an IANA name or an empty value for system detection.');
+        $valid = false;
+    }
+    if (!is_string($config['status_file'] ?? null)) {
+        outputError('status_file must be a string');
+        $valid = false;
+    } elseif (
+        !validateStatusFile($config['status_file'], array_filter([
+            $config['customers']['dir'] ?? null,
+            $config['system']['dir'] ?? null,
+        ], 'is_string'))
+    ) {
         $valid = false;
     }
     if (!in_array($config['archive_method'] ?? null, ['tar', '7z'], true)) {

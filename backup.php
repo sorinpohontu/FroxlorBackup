@@ -9,7 +9,7 @@
  * @copyright   2026 Frontline softworks <https://www.frontline.ro>
  * @license     https://opensource.org/licenses/BSD-3-Clause
  *
- * @since       2026.09.24
+ * @since       2026.10.05
  */
 
 // Help / Usage
@@ -288,6 +288,21 @@ if ($timings !== '') {
 }
 outputSeparator();
 output(outputHasErrors() ? 'Completed with errors.' : 'Backup finished successfully at ' . date('Y-m-d H:i:s'));
+
+if ($dryRun) {
+    if ($config['status_file'] === '') {
+        output('[dry-run] Backup success status: disabled');
+    } else {
+        if (!is_dir(dirname($config['status_file']))) {
+            output('[dry-run] would create backup success status directory: ' . dirname($config['status_file']));
+        }
+        output('[dry-run] would update backup success status after a successful backup: ' . $config['status_file']);
+    }
+} elseif ($config['status_file'] !== '' && !outputHasErrors()) {
+    if (writeSuccessStamp($config['status_file'], [$config['customers']['dir'], $config['system']['dir']])) {
+        output('Backup success status updated: ' . $config['status_file']);
+    }
+}
 
 // Email report
 if (($config['email']['enabled'] && !$dryRun) || $testEmail) {

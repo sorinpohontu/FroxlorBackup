@@ -9,7 +9,7 @@
  * @copyright   2025-2026 Frontline softworks <https://www.frontline.ro>
  * @license     https://opensource.org/licenses/BSD-3-Clause
  *
- * @since       2026.09.25
+ * @since       2026.10.05
  */
 
 /**
@@ -46,6 +46,63 @@ function reviewRemove(string $path): void
         return;
     }
     unlink($path);
+}
+
+/**
+ * Run a disposable backup installation with fixture configuration
+ *
+ * @param string   $installation Fixture installation directory
+ * @param array    $config       Local overrides
+ * @param string[] $arguments    CLI flags
+ * @param string   $helpers      Fixture helper source
+ *
+ * @return array{0: int, 1: string} Exit code and captured output
+ */
+function reviewRunStampFixture(string $installation, array $config, array $arguments, string $helpers): array
+{
+    file_put_contents($installation . '/config.local.php', '<?php return ' . var_export($config, true) . ';');
+    chmod($installation . '/config.local.php', 0600);
+    file_put_contents($installation . '/lib/BackupHelpers.php', $helpers);
+    $command = escapeshellarg(PHP_BINARY) . ' ' . escapeshellarg($installation . '/backup.php');
+    foreach ($arguments as $argument) {
+        $command .= ' ' . escapeshellarg($argument);
+    }
+    $lines = [];
+    $status = 0;
+    exec($command . ' 2>&1', $lines, $status);
+
+    return [$status, implode(PHP_EOL, $lines)];
+}
+
+/**
+ * Inject one failure into a disposable copy of helper source
+ *
+ * @param string $source      Original fixture source
+ * @param string $operation   Unique operation to replace
+ * @param string $replacement Fixture operation
+ *
+ * @return string Modified fixture source
+ */
+function reviewReplaceFixtureCode(string $source, string $operation, string $replacement): string
+{
+    reviewCheck(substr_count($source, $operation) === 1, 'Fixture operation is not unique: ' . $operation);
+
+    return str_replace($operation, $replacement, $source);
+}
+
+/**
+ * Assert preservation of a previous success stamp
+ *
+ * @param string  $path Stamp path
+ * @param string  $text Previous contents
+ * @param integer $time Previous modification time
+ *
+ * @return void
+ */
+function reviewStampUnchanged(string $path, string $text, int $time): void
+{
+    clearstatcache(true, $path);
+    reviewCheck(file_get_contents($path) === $text && filemtime($path) === $time, 'Previous success stamp changed');
 }
 
 require_once dirname(__DIR__) . '/lib/BackupHelpers.php';
@@ -323,5 +380,291 @@ fwrite($pair[0], "250-first\r\n550 second\r\n");
 reviewCheck(smtpReadReply($pair[1]) === null, 'SMTP reader accepted inconsistent response codes');
 fclose($pair[0]);
 fclose($pair[1]);
+
+$stampDir = $root . '/status';
+ensureDir($stampDir);
+$stampPath = $stampDir . '/last-success';
+$stampRoots = [$root . '/stamp-clients', $root . '/stamp-system'];
+$installation = $root . '/stamp-app';
+ensureDir($installation . '/lib');
+foreach (['backup.php', 'config.php', 'lib/BackupHelpers.php', 'lib/BackupSteps.php'] as $file) {
+    copy(dirname(__DIR__) . '/' . $file, $installation . '/' . $file);
+    chmod($installation . '/' . $file, 0600);
+}
+$helperSource = file_get_contents($installation . '/lib/BackupHelpers.php');
+if (PHP_OS === 'Darwin') {
+    $helperSource = reviewReplaceFixtureCode(
+        $helperSource,
+        'function dirSize(string $path): ?int' . "\n{\n",
+        'function dirSize(string $path): ?int' . "\n{\n    return 0;\n"
+    );
+}
+$stampSource = $root . '/stamp-content';
+file_put_contents($stampSource, 'Fixture backup content');
+$stampList = $root . '/stamp-list';
+file_put_contents($stampList, $stampSource . PHP_EOL);
+$stampConfig = [
+    'timezone'       => 'UTC',
+    'archive_method' => 'tar',
+    'status_file'    => $stampPath,
+    'customers'      => ['dir' => $stampRoots[0]],
+    'system'         => [
+        'enabled'   => true,
+        'dir'       => $stampRoots[1],
+        'file_list' => $stampList,
+    ],
+];
+$unrelatedTemporary = $stampPath . '.tmp';
+file_put_contents($unrelatedTemporary, 'Unrelated temporary file');
+$before = scandir($stampDir);
+list($status, $log) = reviewRunStampFixture($installation, $stampConfig, ['--check-install'], $helperSource);
+reviewCheck($status === 0 && scandir($stampDir) === $before, 'Installation check created the initial stamp');
+reviewCheck(strpos($log, '[OK] Backup success status: ' . $stampPath . ' (directory writable)') !== false, 'Installation check omitted status_file');
+list($status, $log) = reviewRunStampFixture($installation, $stampConfig, [], $helperSource);
+reviewCheck($status === 0, 'Success-stamp fixture failed: ' . $log);
+reviewCheck(strpos($log, 'Backup success status updated: ' . $stampPath) !== false, 'Successful publication was not reported');
+$stampText = file_get_contents($stampPath);
+reviewCheck(
+    date_create(trim($stampText)) !== false && preg_match('/^\d{4}-\d{2}-\d{2}T.*\n$/D', $stampText) === 1,
+    'Success stamp has an invalid timestamp'
+);
+clearstatcache(true, $stampPath);
+reviewCheck((fileperms($stampPath) & 0777) === 0600, 'Success-stamp permissions are not 0600');
+reviewCheck(file_get_contents($unrelatedTemporary) === 'Unrelated temporary file', 'Unrelated temporary was changed');
+reviewCheck(scandir($stampDir) === ['.', '..', 'last-success', 'last-success.tmp'], 'Success left a temporary stamp');
+
+$previousStamp = '2000-01-01T00:00:00+00:00' . PHP_EOL;
+$previousTime = 946684800;
+file_put_contents($stampPath, $previousStamp);
+touch($stampPath, $previousTime);
+list($status, $log) = reviewRunStampFixture($installation, $stampConfig, [], $helperSource);
+clearstatcache(true, $stampPath);
+reviewCheck($status === 0 && filemtime($stampPath) > $previousTime, 'Successful run did not replace the old stamp');
+
+file_put_contents($stampPath, $previousStamp);
+touch($stampPath, $previousTime);
+foreach ([['--dry-run'], ['--check-install']] as $arguments) {
+    $before = scandir($stampDir);
+    list($status, $log) = reviewRunStampFixture($installation, $stampConfig, $arguments, $helperSource);
+    reviewCheck($status === 0, 'Read-only stamp fixture failed: ' . $log);
+    if ($arguments === ['--dry-run']) {
+        reviewCheck(
+            strpos($log, '[dry-run] would update backup success status after a successful backup: ' . $stampPath) !== false,
+            'Dry run omitted status_file'
+        );
+    }
+    reviewStampUnchanged($stampPath, $previousStamp, $previousTime);
+    reviewCheck(scandir($stampDir) === $before, 'Read-only command created a stamp probe');
+}
+file_put_contents($stampList, $root . '/missing-stamp-source' . PHP_EOL);
+list($status, $log) = reviewRunStampFixture($installation, $stampConfig, [], $helperSource);
+reviewCheck($status === 1 && strpos($log, 'Completed with errors.') !== false, 'Step failure did not fail the run');
+reviewStampUnchanged($stampPath, $previousStamp, $previousTime);
+file_put_contents($stampList, $stampSource . PHP_EOL);
+
+$disabledConfig = $stampConfig;
+$disabledConfig['status_file'] = '';
+$before = scandir($stampDir);
+list($status, $log) = reviewRunStampFixture($installation, $disabledConfig, [], $helperSource);
+reviewCheck($status === 0 && scandir($stampDir) === $before, 'Disabled stamp wrote a file');
+reviewStampUnchanged($stampPath, $previousStamp, $previousTime);
+
+$disabledCheckLines = installationCheckLines(array_replace_recursive(require dirname(__DIR__) . '/config.php', $disabledConfig));
+reviewCheck(in_array('Backup success status: disabled', $disabledCheckLines, true), 'Installation check omitted disabled status_file');
+list($status, $log) = reviewRunStampFixture($installation, $disabledConfig, ['--dry-run'], $helperSource);
+reviewCheck($status === 0 && strpos($log, '[dry-run] Backup success status: disabled') !== false, 'Dry run omitted disabled status_file');
+
+$invalidPaths = [
+    false,
+    null,
+    [],
+    'relative-stamp',
+    $stampDir . '/../last-success',
+    $stampDir . '/./last-success',
+    $stampDir . '//last-success',
+    $stampDir . '/last-success/',
+    $stampPath . "\0",
+    $stampDir,
+    $stampSource . '/missing-parent/last-success',
+    $stampRoots[0],
+    $stampRoots[0] . '/last-success',
+    $stampRoots[1] . '/last-success',
+];
+foreach ($invalidPaths as $invalidPath) {
+    $invalidConfig = $stampConfig;
+    $invalidConfig['status_file'] = $invalidPath;
+    list($status, $log) = reviewRunStampFixture($installation, $invalidConfig, ['--check-install'], $helperSource);
+    reviewCheck($status === 1 && strpos($log, 'status_file') !== false, 'Invalid status_file was accepted');
+    reviewStampUnchanged($stampPath, $previousStamp, $previousTime);
+}
+
+$autoConfig = $stampConfig;
+$autoDirectory = $root . '/auto-status/nested';
+$autoConfig['status_file'] = $autoDirectory . '/last-success';
+foreach ([['--dry-run'], ['--check-install']] as $arguments) {
+    list($status, $log) = reviewRunStampFixture($installation, $autoConfig, $arguments, $helperSource);
+    reviewCheck($status === 0 && !file_exists($root . '/auto-status'), 'Read-only command created stamp directories: ' . $log);
+    if ($arguments === ['--check-install']) {
+        reviewCheck(
+            strpos($log, '[OK] Backup success status: ' . $autoConfig['status_file'] . ' (directory can be created)') !== false,
+            'Installation check omitted stamp directory creatability'
+        );
+    } else {
+        reviewCheck(
+            strpos($log, '[dry-run] would create backup success status directory: ' . $autoDirectory) !== false
+            && strpos($log, '[dry-run] would update backup success status after a successful backup: ' . $autoConfig['status_file']) !== false,
+            'Dry run omitted stamp directory creation or publication'
+        );
+    }
+}
+file_put_contents($stampList, $root . '/missing-stamp-source' . PHP_EOL);
+list($status, $log) = reviewRunStampFixture($installation, $autoConfig, [], $helperSource);
+reviewCheck($status === 1 && !file_exists($root . '/auto-status'), 'Failed backup created stamp directories');
+file_put_contents($stampList, $stampSource . PHP_EOL);
+$mkdirHelpers = reviewReplaceFixtureCode($helperSource, '!@mkdir($directory, 0700, true)', 'true');
+list($status, $log) = reviewRunStampFixture($installation, $autoConfig, [], $mkdirHelpers);
+reviewCheck(
+    $status === 1 && strpos($log, 'Cannot create success-stamp directory') !== false
+    && !file_exists($root . '/auto-status'),
+    'Stamp directory creation failure did not fail the run: ' . $log
+);
+list($status, $log) = reviewRunStampFixture($installation, $autoConfig, [], $helperSource);
+reviewCheck($status === 0 && is_file($autoConfig['status_file']), 'Normal run did not create stamp directories: ' . $log);
+foreach ([$root . '/auto-status', $autoDirectory] as $createdDirectory) {
+    clearstatcache(true, $createdDirectory);
+    reviewCheck(
+        (fileperms($createdDirectory) & 0777) === 0700 && fileowner($createdDirectory) === posix_geteuid(),
+        'Created stamp directory has unsafe permissions or ownership'
+    );
+}
+reviewCheck((fileperms($autoConfig['status_file']) & 0777) === 0600, 'Created stamp has unsafe permissions');
+
+symlink($stampPath, $stampDir . '/stamp-link');
+symlink($stampDir . '/absent', $stampDir . '/dangling-link');
+symlink($stampDir, $root . '/status-link');
+foreach ([$stampDir . '/stamp-link', $stampDir . '/dangling-link', $root . '/status-link/new-stamp'] as $unsafePath) {
+    outputInit();
+    reviewCheck(!writeSuccessStamp($unsafePath, $stampRoots) && outputHasErrors(), 'Symlink stamp path was accepted');
+    reviewStampUnchanged($stampPath, $previousStamp, $previousTime);
+}
+unlink($stampDir . '/stamp-link');
+unlink($stampDir . '/dangling-link');
+unlink($root . '/status-link');
+
+foreach ([[$stampPath, 0666], [$stampDir, 0777]] as $unsafePermissions) {
+    chmod($unsafePermissions[0], $unsafePermissions[1]);
+    list($status, $log) = reviewRunStampFixture($installation, $stampConfig, ['--check-install'], $helperSource);
+    reviewCheck($status === 1 && strpos($log, 'status_file') !== false, 'Unsafe stamp permissions were accepted');
+    reviewStampUnchanged($stampPath, $previousStamp, $previousTime);
+    chmod($unsafePermissions[0], $unsafePermissions[0] === $stampPath ? 0600 : 0700);
+}
+if (!isRootProcess()) {
+    chmod($stampDir, 0500);
+    $blockedConfig = $stampConfig;
+    $blockedConfig['status_file'] = $stampDir . '/missing/nested/last-success';
+    list($blockedStatus, $blockedLog) = reviewRunStampFixture(
+        $installation,
+        $blockedConfig,
+        ['--check-install'],
+        $helperSource
+    );
+    list($status, $log) = reviewRunStampFixture($installation, $stampConfig, [], $helperSource);
+    chmod($stampDir, 0700);
+    reviewCheck(
+        $blockedStatus === 1 && strpos($blockedLog, 'status_file directory') !== false
+        && !file_exists($stampDir . '/missing'),
+        'Unwritable ancestor allowed missing stamp directories'
+    );
+    reviewCheck($status === 1 && strpos($log, 'status_file directory') !== false, 'Unwritable stamp directory was accepted');
+    reviewStampUnchanged($stampPath, $previousStamp, $previousTime);
+    if (is_file('/etc/passwd') && fileowner('/etc/passwd') === 0) {
+        outputInit();
+        reviewCheck(
+            !validateStatusFile('/etc/passwd', $stampRoots) && strpos(outputGet(), 'belong to the backup user') !== false,
+            'Existing stamp owned by a different user was accepted'
+        );
+    }
+}
+
+$stampFaults = [
+    '$fp = @fopen($temporaryFile, \'xb\');'  => '$fp = false;',
+    'if (!@chmod($temporaryFile, 0600)) {'  => 'if (true) {',
+    '$written = @fwrite($fp, $stamp);'      => '$written = @fwrite($fp, substr($stamp, 0, -1));',
+    '$flushed = @fflush($fp);'             => '$flushed = @fflush($fp) && false;',
+    '$closed = @fclose($fp);'              => '$closed = @fclose($fp) && false;',
+    'if (!@rename($temporaryFile, $path)) {' => 'if (true) {',
+];
+foreach ($stampFaults as $operation => $replacement) {
+    $faultHelpers = reviewReplaceFixtureCode($helperSource, $operation, $replacement);
+    $before = scandir($stampDir);
+    list($status, $log) = reviewRunStampFixture($installation, $stampConfig, [], $faultHelpers);
+    reviewCheck(
+        $status === 1 && preg_match('/ERROR: .*success[ -]stamp/i', $log) === 1,
+        'Stamp publication failure did not fail the run: ' . $log
+    );
+    reviewStampUnchanged($stampPath, $previousStamp, $previousTime);
+    reviewCheck(scandir($stampDir) === $before, 'Stamp failure left temporary files');
+    reviewCheck(file_get_contents($unrelatedTemporary) === 'Unrelated temporary file', 'Failure removed an unrelated file');
+}
+
+$recheckHelpers = reviewReplaceFixtureCode(
+    $helperSource,
+    '$closed = @fclose($fp);',
+    '$closed = @fclose($fp); chmod(dirname($path), 0777);'
+);
+$before = scandir($stampDir);
+list($status, $log) = reviewRunStampFixture($installation, $stampConfig, [], $recheckHelpers);
+chmod($stampDir, 0700);
+reviewCheck($status === 1 && strpos($log, 'Unsafe status_file parent') !== false, 'Publication skipped path revalidation');
+reviewStampUnchanged($stampPath, $previousStamp, $previousTime);
+reviewCheck(scandir($stampDir) === $before, 'Path revalidation failure left a temporary stamp');
+
+$smtpHelpers = reviewReplaceFixtureCode(
+    $helperSource,
+    'function smtpSend(array $smtpConfig, string $from, string $to, string $subject, string $body): bool' . "\n{\n",
+    'function smtpSend(array $smtpConfig, string $from, string $to, string $subject, string $body): bool' . "\n{\n"
+        . '    file_put_contents(__DIR__ . \'/../email-fixture\', $subject . PHP_EOL . $body);' . "\n"
+        . '    outputError(\'Fixture SMTP failure\');' . "\n"
+        . '    return false;' . "\n"
+);
+$emailConfig = $stampConfig;
+$emailConfig['email'] = [
+    'enabled' => true,
+    'from'    => 'backup@example.com',
+    'to'      => 'monitor@example.com',
+    'smtp'    => [
+        'host'       => 'localhost',
+        'user'       => 'fixture-user',
+        'password'   => 'fixture-password',
+        'encryption' => '',
+    ],
+];
+list($status, $log) = reviewRunStampFixture($installation, $emailConfig, ['--dry-run', '--test-email'], $smtpHelpers);
+reviewCheck($status === 1 && strpos($log, 'Fixture SMTP failure') !== false, 'Dry-run test email was not attempted: ' . $log);
+reviewStampUnchanged($stampPath, $previousStamp, $previousTime);
+$missingEmailConfig = $emailConfig;
+$missingEmailConfig['status_file'] = $root . '/test-email-status/nested/last-success';
+list($status, $log) = reviewRunStampFixture($installation, $missingEmailConfig, ['--dry-run', '--test-email'], $smtpHelpers);
+reviewCheck(
+    $status === 1 && strpos($log, 'Fixture SMTP failure') !== false && !file_exists($root . '/test-email-status'),
+    'Dry-run test email created stamp directories'
+);
+
+$renameSmtpHelpers = reviewReplaceFixtureCode($smtpHelpers, 'if (!@rename($temporaryFile, $path)) {', 'if (true) {');
+list($status, $log) = reviewRunStampFixture($installation, $emailConfig, [], $renameSmtpHelpers);
+reviewCheck($status === 1, 'Stamp and email failure did not fail the run');
+reviewStampUnchanged($stampPath, $previousStamp, $previousTime);
+$emailReport = file_get_contents($installation . '/email-fixture');
+reviewCheck(
+    strpos($emailReport, '[Error]') !== false && strpos($emailReport, 'Cannot publish success stamp') !== false,
+    'Stamp error was absent from the email subject or body'
+);
+list($status, $log) = reviewRunStampFixture($installation, $emailConfig, [], $smtpHelpers);
+clearstatcache(true, $stampPath);
+reviewCheck(
+    $status === 1 && strpos($log, 'Fixture SMTP failure') !== false && filemtime($stampPath) > $previousTime,
+    'SMTP failure rolled back the successful stamp'
+);
+reviewCheck(date_create(trim(file_get_contents($stampPath))) !== false, 'SMTP failure left an invalid stamp');
 
 echo "Review smoke checks passed.\n";

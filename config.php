@@ -9,7 +9,7 @@
  * @copyright   2026 Frontline softworks <https://www.frontline.ro>
  * @license     https://opensource.org/licenses/BSD-3-Clause
  *
- * @since       2026.09.24
+ * @since       2026.10.05
  */
 
 /*
@@ -22,6 +22,9 @@ return [
     // Timezone — empty uses the operating system or CLI PHP timezone
     // -------------------------------------------------------------------------
     'timezone' => '',
+
+    // Backup success status (empty disabled)
+    'status_file' => '',
 
     // -------------------------------------------------------------------------
     // Archive method — applies to all backup sections
