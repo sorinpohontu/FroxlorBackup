@@ -28,7 +28,7 @@ Backs up customer vhosts, databases, mailboxes and logs — plus system config f
 - `s3cmd` — if S3 sync is enabled ([s3tools.org](http://s3tools.org/download))
 - `7zz` or `7z` — only if `archive_method` is set to `'7z'` (prefers official `7zz` via `apt install 7zip`, falls back to legacy `7z` via `apt install p7zip-full`)
 
-`php backup.php --check-install` validates local PHP capabilities, files, configuration, writable paths, and binaries required by the enabled features. It is intentionally offline and does not test SSH/S3 connectivity or commands supported by a restricted remote endpoint.
+`php backup.php --check-install` validates local PHP capabilities, files, configuration, writable paths, and required binaries. With email enabled and no SMTP greeting override, it also checks forward and reverse DNS. It does not test SMTP/SSH/S3 connectivity or credentials.
 
 ## Installation
 
@@ -80,6 +80,8 @@ Configuration is split into two files:
 Values are deep-merged with `array_replace_recursive()`. See `config.local.php.example` for all available options with descriptions.
 
 The default empty `timezone` detects the operating-system timezone, then falls back to the CLI PHP timezone. Set an explicit IANA name such as `Europe/Bucharest` in `config.local.php` only when the backup should use a different timezone.
+
+Set `email.smtp.ehlo_hostname` to override the SMTP greeting with this server's FQDN (for example `backup.example.com`). Empty detects a name with matching forward/reverse DNS, warning and using the system hostname if verification fails.
 
 ### Minimal example
 
@@ -179,7 +181,7 @@ php backup.php --check-install
 php backup.php --dry-run --test-email
 ```
 
-Plain dry-run sends no email and writes no lock or temporary list. `--test-email` is the explicit exception: it sends a test report. `--check-install` does not contact remote services or create files; it reports local prerequisites. At least one backup section must be enabled. Backups and restores still need target-server verification after installation.
+Plain dry-run sends no email and writes no lock or temporary list. `--test-email` is the explicit exception: it sends a test report. `--check-install` creates no files and checks SMTP greeting DNS when automatic detection is enabled; it does not test remote connectivity. At least one backup section must be enabled. Backups and restores still need target-server verification after installation.
 
 ## Cron setup
 

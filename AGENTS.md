@@ -100,7 +100,7 @@ The main execution contexts are:
 - **Console** (manual): `php backup.php` — output goes to stdout
 - **Cron**: output goes to stdout and is buffered internally; the completed report is sent through SMTP when enabled
 - **Dry run**: `php backup.php --dry-run` — previews work without writing files, taking the lock, or sending the normal report
-- **Installation check**: `php backup.php --check-install` — validates local configuration, paths, PHP capabilities, and enabled tools without contacting remote services
+- **Installation check**: `php backup.php --check-install` — validates configuration, paths, PHP capabilities, enabled tools, and SMTP greeting DNS when automatic detection is enabled; no SMTP/SSH/S3 connections or state changes
 - **Help**: `php backup.php --help` — exits before loading configuration
 
 `--dry-run --test-email` is the explicit exception to dry-run email suppression and sends a test report.
@@ -311,7 +311,7 @@ The script supports these optional flags:
 | `--verbose` | Show detailed output (per-file progress, etc.) |
 | `--dry-run` | Preview without changing files or sending the normal report |
 | `--test-email` | Send a test report; valid only together with `--dry-run` |
-| `--check-install` | Validate local requirements without changing state or contacting remote services |
+| `--check-install` | Validate local requirements and automatic SMTP greeting DNS without changing state or testing remote connectivity |
 
 ```bash
 php backup.php                # normal run

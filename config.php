@@ -118,11 +118,12 @@ return [
     'email' => [
         'enabled' => false,
         'smtp'    => [
-            'host'       => '',
-            'port'       => 587,
-            'user'       => '',
-            'password'   => '',
-            'encryption' => 'tls',  // 'tls', 'ssl', or '' for none
+            'host'          => '',
+            'port'          => 587,
+            'user'          => '',
+            'password'      => '',
+            'encryption'    => 'tls',  // 'tls', 'ssl', or '' for none
+            'ehlo_hostname' => '',
         ],
         'from'    => '',    // e.g. 'notify@example.com'
         'to'      => '',    // e.g. 'admin@example.com'

@@ -2276,6 +2276,12 @@ function installationCheckLines(array $config, bool $sendEmail = false): array
         $directoryStatus = is_dir(dirname($statusFile)) ? 'writable' : 'can be created';
         $lines[] = 'Backup success status: ' . $statusFile . ' (directory ' . $directoryStatus . ')';
     }
+    if ($emailEnabled) {
+        $dnsVerified = null;
+        $greeting = resolveSmtpEhloHostname($config['email']['smtp'], $dnsVerified);
+        $source = $dnsVerified === null ? 'configured' : ($dnsVerified ? 'forward/reverse DNS match' : 'system hostname fallback');
+        $lines[] = 'SMTP greeting: ' . $greeting . ' (' . $source . ')';
+    }
 
     return $lines;
 }
@@ -2628,6 +2634,10 @@ function validateConfig(array $config, bool $sendEmail = false): bool
             }
         }
         $smtp = $config['email']['smtp'];
+        if (smtpEhloHostname($smtp) === null) {
+            outputError('email.smtp.ehlo_hostname must be empty or a valid FQDN');
+            $valid = false;
+        }
         if (
             !is_string($smtp['host'] ?? null)
             || preg_match('/^[A-Za-z0-9.-]+$/D', $smtp['host']) !== 1
@@ -2988,6 +2998,117 @@ function isValidExcludePath(string $path): bool
 // =============================================================================
 
 /**
+ * Resolve the SMTP greeting from an optional explicit FQDN
+ *
+ * @param array $smtpConfig SMTP settings, including optional ehlo_hostname
+ *
+ * @return string|null Null for an invalid configured FQDN
+ */
+function smtpEhloHostname(array $smtpConfig): ?string
+{
+    $hostname = array_key_exists('ehlo_hostname', $smtpConfig) ? $smtpConfig['ehlo_hostname'] : '';
+    if (!is_string($hostname)) {
+        return null;
+    }
+    if ($hostname === '') {
+        $hostname = trim(gethostname()) ?: 'localhost';
+
+        return preg_match('/^[A-Za-z0-9.-]+$/D', $hostname) === 1 ? $hostname : 'localhost';
+    }
+    if (
+        strlen($hostname) > 253 || filter_var($hostname, FILTER_VALIDATE_IP) !== false
+        || preg_match('/^(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$/D', $hostname) !== 1
+    ) {
+        return null;
+    }
+
+    return $hostname;
+}
+
+/**
+ * Detect an FQDN with matching PTR and forward address records
+ *
+ * @return string|null Null when the running host cannot be verified
+ */
+function detectSmtpEhloHostname(): ?string
+{
+    if (
+        !isPhpFunctionAvailable('dns_get_record') || !isPhpFunctionAvailable('gethostbynamel')
+        || !isPhpFunctionAvailable('gethostbyaddr') || !isPhpFunctionAvailable('inet_pton')
+    ) {
+        return null;
+    }
+    $systemHostname = trim(gethostname()) ?: 'localhost';
+    $addresses = @gethostbynamel($systemHostname);
+    $addresses = is_array($addresses) ? $addresses : [];
+    $names = [$systemHostname];
+    foreach (array_slice($addresses, 0, 8) as $address) {
+        $canonical = @gethostbyaddr($address);
+        if (is_string($canonical) && $canonical !== '') {
+            $names[] = rtrim(strtolower($canonical), '.');
+        }
+    }
+    foreach (array_slice(array_unique($names), 0, 8) as $name) {
+        if (smtpEhloHostname(['ehlo_hostname' => $name]) === null) {
+            continue;
+        }
+        $records = @dns_get_record($name . '.', DNS_A | DNS_AAAA);
+        foreach (is_array($records) ? $records : [] as $record) {
+            $addresses[] = $record['ip'] ?? $record['ipv6'] ?? '';
+        }
+    }
+    foreach (array_slice(array_unique($addresses), 0, 16) as $address) {
+        if (filter_var($address, FILTER_VALIDATE_IP) === false) {
+            continue;
+        }
+        $packed = inet_pton($address);
+        $reverseName = strpos($address, ':') === false ? implode('.', array_reverse(explode('.', $address))) . '.in-addr.arpa.' : implode('.', str_split(strrev(bin2hex($packed)))) . '.ip6.arpa.';
+        $reverseRecords = @dns_get_record($reverseName, DNS_PTR);
+        foreach (array_slice(is_array($reverseRecords) ? $reverseRecords : [], 0, 8) as $record) {
+            $target = rtrim(strtolower($record['target'] ?? ''), '.');
+            if ($target === '' || smtpEhloHostname(['ehlo_hostname' => $target]) === null) {
+                continue;
+            }
+            $forwardRecords = @dns_get_record($target . '.', DNS_A | DNS_AAAA);
+            foreach (is_array($forwardRecords) ? $forwardRecords : [] as $forwardRecord) {
+                $forwardAddress = $forwardRecord['ip'] ?? $forwardRecord['ipv6'] ?? '';
+                if (filter_var($forwardAddress, FILTER_VALIDATE_IP) !== false && inet_pton($forwardAddress) === $packed) {
+                    return $target;
+                }
+            }
+        }
+    }
+
+    return null;
+}
+
+/**
+ * Resolve an explicit greeting or detect it with a nonfatal fallback
+ *
+ * @param array        $smtpConfig  SMTP settings
+ * @param boolean|null $dnsVerified DNS match result; null for an explicit override
+ *
+ * @return string|null Null for an invalid configured FQDN
+ */
+function resolveSmtpEhloHostname(array $smtpConfig, ?bool &$dnsVerified = null): ?string
+{
+    $dnsVerified = null;
+    $fallback = smtpEhloHostname($smtpConfig);
+    if ($fallback === null || ($smtpConfig['ehlo_hostname'] ?? '') !== '') {
+        return $fallback;
+    }
+    $detected = detectSmtpEhloHostname();
+    $dnsVerified = $detected !== null;
+    if ($detected !== null) {
+        return $detected;
+    }
+    outputWarn('Cannot verify the SMTP greeting FQDN using forward and reverse DNS; using ' . $fallback
+        . '. Set email.smtp.ehlo_hostname to override.');
+
+    return $fallback;
+}
+
+/**
  * Read a complete SMTP reply, including continuation lines
  *
  * @param resource $socket SMTP stream
@@ -3213,7 +3334,7 @@ function wrapEmailHtml(string $plainBody, bool $hasErrors): string
  * Supports plain, STARTTLS (port 587), and SSL (port 465) connections.
  * Sends a multipart/alternative message with both text/plain and text/html parts.
  *
- * @param array  $smtpConfig Keys: host, port, user, password, encryption ('tls'|'ssl'|'')
+ * @param array  $smtpConfig Keys: host, port, user, password, encryption ('tls'|'ssl'|''), optional ehlo_hostname
  * @param string $from       Sender address
  * @param string $to         Recipient address
  * @param string $subject    Email subject
@@ -3228,6 +3349,12 @@ function smtpSend(array $smtpConfig, string $from, string $to, string $subject, 
         || !isValidHeaderValue($subject) || strlen($subject) > 256
     ) {
         outputError('Invalid SMTP address or subject');
+        return false;
+    }
+    $identity = resolveSmtpEhloHostname($smtpConfig);
+    if ($identity === null) {
+        outputError('email.smtp.ehlo_hostname must be empty or a valid FQDN');
+
         return false;
     }
     $host       = $smtpConfig['host'];
@@ -3258,10 +3385,6 @@ function smtpSend(array $smtpConfig, string $from, string $to, string $subject, 
         return false;
     }
     stream_set_timeout($socket, 30);
-    $identity = trim(gethostname()) ?: 'localhost';
-    if (preg_match('/^[A-Za-z0-9.-]+$/D', $identity) !== 1) {
-        $identity = 'localhost';
-    }
     if (smtpReadReply($socket) !== 220 || smtpCommand($socket, 'EHLO ' . $identity) !== 250) {
         outputError('SMTP greeting or EHLO failed');
         fclose($socket);

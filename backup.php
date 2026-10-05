@@ -19,7 +19,7 @@ if (in_array('--help', $argv ?? [], true) || in_array('-h', $argv ?? [], true)) 
         '',
         'Options:',
         '  -h, --help       Show this help and exit',
-        '  --check-install  Check local config, PHP capabilities, and tools without changes',
+        '  --check-install  Check config, paths, tools, and SMTP greeting DNS without changes',
         '  --dry-run        Preview backup actions without changing files or sending a report',
         '  --test-email     Send a test report; requires --dry-run',
         '  --verbose        Show detailed backup progress',

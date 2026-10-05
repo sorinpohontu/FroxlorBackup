@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2.2.0] - 2026-10-05
+
+### Added
+- Detect the SMTP greeting FQDN using matching forward/reverse DNS, with an optional `email.smtp.ehlo_hostname` override
+
+### Changed
+- Show the selected SMTP greeting and DNS verification result during `--check-install`
+
+---
+
 ## [2.1.0] - 2026-10-05
 
 ### Added

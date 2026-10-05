@@ -105,8 +105,140 @@ function reviewStampUnchanged(string $path, string $text, int $time): void
     reviewCheck(file_get_contents($path) === $text && filemtime($path) === $time, 'Previous success stamp changed');
 }
 
+/**
+ * Replace resolver calls in copied helpers with controlled DNS records
+ *
+ * @param string $helpers Original helper source
+ * @param array  $dns     Fixture hostname, addresses, canonical names, and records
+ *
+ * @return string Fixture helper source
+ */
+function reviewDnsFixtureSource(string $helpers, array $dns = []): string
+{
+    $helpers = reviewReplaceFixtureCode(
+        $helpers,
+        '$systemHostname = trim(gethostname()) ?: \'localhost\';',
+        '$systemHostname = ' . var_export($dns['hostname'] ?? 'fixture', true) . ';'
+    );
+    $helpers = reviewReplaceFixtureCode($helpers, '@gethostbynamel($systemHostname)', 'reviewHostAddresses($systemHostname)');
+    $helpers = reviewReplaceFixtureCode($helpers, '@gethostbyaddr($address)', 'reviewCanonicalHost($address)');
+    reviewCheck(substr_count($helpers, '@dns_get_record(') === 3, 'DNS fixture query count changed');
+    $helpers = str_replace('@dns_get_record(', 'reviewDnsRecords(', $helpers);
+    $helpers .= "\n" . '$GLOBALS[\'reviewDns\'] = ' . var_export($dns, true) . ';' . "\n";
+    $helpers .= <<<'PHP'
+function reviewHostAddresses(string $hostname)
+{
+    if ($GLOBALS['reviewDns']['forbid'] ?? false) {
+        throw new RuntimeException('Unexpected DNS resolution');
+    }
+    return $GLOBALS['reviewDns']['addresses'] ?? false;
+}
+function reviewCanonicalHost(string $address)
+{
+    return $GLOBALS['reviewDns']['canonical'][$address] ?? $address;
+}
+function reviewDnsRecords(string $hostname, int $type)
+{
+    return $GLOBALS['reviewDns']['records'][$hostname] ?? false;
+}
+PHP;
+
+    return $helpers;
+}
+
+/**
+ * Capture real SMTP greeting commands using a socket-pair fixture
+ *
+ * @param string $directory  Fixture directory
+ * @param string $helpers    Original helper source
+ * @param array  $smtpConfig SMTP configuration
+ *
+ * @return array{0: bool, 1: string, 2: string} Send result, commands, and log
+ */
+function reviewSmtpConversation(string $directory, string $helpers, array $smtpConfig): array
+{
+    ensureDir($directory);
+    $helpers = reviewReplaceFixtureCode($helpers, '@stream_socket_client(', 'reviewSmtpConnect(');
+    $helpers = reviewReplaceFixtureCode(
+        $helpers,
+        'stream_socket_enable_crypto($socket, true, STREAM_CRYPTO_METHOD_TLS_CLIENT)',
+        'true'
+    );
+    file_put_contents($directory . '/helpers.php', $helpers);
+    $runner = <<<'PHP'
+<?php
+require __DIR__ . '/helpers.php';
+function reviewSmtpConnect(string $address, &$errno, &$errstr, int $timeout, int $flags, $context)
+{
+    return $GLOBALS['reviewSmtpSocket'];
+}
+$pair = stream_socket_pair(STREAM_PF_UNIX, STREAM_SOCK_STREAM, STREAM_IPPROTO_IP);
+if ($pair === false) {
+    throw new RuntimeException('Cannot create SMTP conversation fixture');
+}
+$GLOBALS['reviewSmtpSocket'] = $pair[0];
+$smtpConfig = FIXTURE_CONFIG;
+$replies = "220 Ready\r\n250 Hello\r\n";
+if ($smtpConfig['encryption'] === 'tls') {
+    $replies .= "220 Start TLS\r\n250 Hello again\r\n";
+}
+$replies .= "535 Fixture authentication refusal\r\n";
+fwrite($pair[1], $replies);
+ob_start();
+$sent = smtpSend($smtpConfig, 'backup@example.com', 'monitor@example.com', 'Fixture', 'Fixture report');
+$log = ob_get_clean();
+if (is_resource($pair[0])) {
+    fclose($pair[0]);
+}
+$commands = stream_get_contents($pair[1]);
+fclose($pair[1]);
+echo json_encode([$sent, $commands, $log]);
+PHP;
+    file_put_contents($directory . '/runner.php', str_replace('FIXTURE_CONFIG', var_export($smtpConfig, true), $runner));
+    $lines = [];
+    $status = 0;
+    exec(escapeshellarg(PHP_BINARY) . ' ' . escapeshellarg($directory . '/runner.php') . ' 2>&1', $lines, $status);
+    $result = json_decode(implode(PHP_EOL, $lines), true);
+    reviewCheck($status === 0 && is_array($result), 'SMTP conversation fixture failed: ' . implode(PHP_EOL, $lines));
+
+    return $result;
+}
+
 require_once dirname(__DIR__) . '/lib/BackupHelpers.php';
 require_once dirname(__DIR__) . '/lib/BackupSteps.php';
+
+foreach (['backup.example.com', 'A.b', 'backup-1.example.com', str_repeat('a', 63) . '.example.com'] as $ehloHostname) {
+    reviewCheck(smtpEhloHostname(['ehlo_hostname' => $ehloHostname]) === $ehloHostname, 'Valid EHLO FQDN was rejected');
+}
+foreach (
+    [
+    null,
+    false,
+    [],
+    'backup',
+    'localhost',
+    '192.0.2.1',
+    '::1',
+    '[192.0.2.1]',
+    '-backup.example.com',
+    'backup-.example.com',
+    'backup..example.com',
+    'backup_example.com',
+    'backup.example.com.',
+    ' backup.example.com',
+    "backup.example.com\r\nMAIL FROM:<injected@example.com>",
+    str_repeat('a', 64) . '.example.com',
+    str_repeat('a.', 127) . 'com',
+    ] as $invalidEhloHostname
+) {
+    reviewCheck(smtpEhloHostname(['ehlo_hostname' => $invalidEhloHostname]) === null, 'Invalid EHLO FQDN was accepted');
+}
+outputInit();
+reviewCheck(
+    !smtpSend(['ehlo_hostname' => "bad\r\nEHLO injected"], 'backup@example.com', 'monitor@example.com', 'Fixture', 'Fixture')
+    && outputHasErrors(),
+    'Direct SMTP send accepted an invalid greeting'
+);
 
 reviewCheck(resolveTimezone('Europe/Bucharest') === 'Europe/Bucharest', 'Explicit timezone was not preserved');
 reviewCheck(resolveTimezone('Invalid/Timezone') === null, 'Invalid timezone was accepted');
@@ -391,7 +523,83 @@ foreach (['backup.php', 'config.php', 'lib/BackupHelpers.php', 'lib/BackupSteps.
     copy(dirname(__DIR__) . '/' . $file, $installation . '/' . $file);
     chmod($installation . '/' . $file, 0600);
 }
-$helperSource = file_get_contents($installation . '/lib/BackupHelpers.php');
+$originalHelpers = file_get_contents($installation . '/lib/BackupHelpers.php');
+$helperSource = reviewDnsFixtureSource($originalHelpers);
+foreach (['', 'tls'] as $greetingEncryption) {
+    list($sent, $commands, $smtpLog) = reviewSmtpConversation($root . '/smtp-greeting', reviewDnsFixtureSource($originalHelpers, ['forbid' => true]), [
+        'host'          => 'smtp.example.com',
+        'port'          => 587,
+        'user'          => 'fixture-user',
+        'password'      => 'fixture-password',
+        'encryption'    => $greetingEncryption,
+        'ehlo_hostname' => 'backup.example.com',
+    ]);
+    reviewCheck(!$sent && strpos($smtpLog, 'authentication challenge failed') !== false, 'SMTP greeting fixture did not reach authentication');
+    reviewCheck(
+        substr_count($commands, "EHLO backup.example.com\r\n") === ($greetingEncryption === 'tls' ? 2 : 1),
+        'Configured FQDN was not used for each EHLO'
+    );
+}
+$autoSmtpConfig = [
+    'host'          => 'smtp.example.com',
+    'port'          => 587,
+    'user'          => 'fixture-user',
+    'password'      => 'fixture-password',
+    'encryption'    => 'tls',
+    'ehlo_hostname' => '',
+];
+$matchingDns = [
+    'addresses' => ['127.0.1.1'],
+    'canonical' => ['127.0.1.1' => 'backup.example.com'],
+    'records'   => [
+        'backup.example.com.'       => [['ip' => '192.0.2.10']],
+        '10.2.0.192.in-addr.arpa.'   => [['target' => 'BACKUP.EXAMPLE.COM.']],
+    ],
+];
+list($sent, $commands, $smtpLog) = reviewSmtpConversation(
+    $root . '/smtp-greeting',
+    reviewDnsFixtureSource($originalHelpers, $matchingDns),
+    $autoSmtpConfig
+);
+reviewCheck(
+    !$sent && substr_count($commands, "EHLO backup.example.com\r\n") === 2 && strpos($smtpLog, 'WARNING:') === false,
+    'Canonical host with matching PTR/forward DNS was not used for both EHLO commands'
+);
+$mismatchedDns = $matchingDns;
+$mismatchedDns['addresses'] = ['192.0.2.10'];
+$mismatchedDns['records']['backup.example.com.'] = [['ip' => '203.0.113.20']];
+$unsafeDns = $matchingDns;
+$unsafeDns['records']['10.2.0.192.in-addr.arpa.'] = [['target' => "backup.example.com\r\nMAIL FROM:<injected@example.com>"]];
+foreach ([[], $mismatchedDns, $unsafeDns] as $failedDns) {
+    list($sent, $commands, $smtpLog) = reviewSmtpConversation(
+        $root . '/smtp-greeting',
+        reviewDnsFixtureSource($originalHelpers, $failedDns),
+        $autoSmtpConfig
+    );
+    reviewCheck(
+        !$sent && strpos($smtpLog, 'WARNING: Cannot verify the SMTP greeting FQDN') !== false
+        && substr_count($commands, 'EHLO ' . smtpEhloHostname([]) . "\r\n") === 2
+        && strpos($commands, 'MAIL FROM:') === false,
+        'Missing, mismatched, or unsafe DNS did not warn and retain the safe greeting'
+    );
+}
+$ipv6Reverse = '0.1.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.8.b.d.0.1.0.0.2.ip6.arpa.';
+$ipv6Dns = [
+    'hostname' => 'backup.example.com',
+    'records'  => [
+        'backup.example.com.' => [['ipv6' => '2001:db8::10']],
+        $ipv6Reverse          => [['target' => 'backup.example.com']],
+    ],
+];
+list($sent, $commands, $smtpLog) = reviewSmtpConversation(
+    $root . '/smtp-greeting',
+    reviewDnsFixtureSource($originalHelpers, $ipv6Dns),
+    $autoSmtpConfig
+);
+reviewCheck(
+    !$sent && substr_count($commands, "EHLO backup.example.com\r\n") === 2 && strpos($smtpLog, 'WARNING:') === false,
+    'IPv6 PTR and forward DNS did not produce the greeting'
+);
 if (PHP_OS === 'Darwin') {
     $helperSource = reviewReplaceFixtureCode(
         $helperSource,
@@ -639,6 +847,45 @@ $emailConfig['email'] = [
         'encryption' => '',
     ],
 ];
+$fqdnConfig = $emailConfig;
+$fqdnConfig['email']['smtp']['ehlo_hostname'] = 'backup.example.com';
+list($status, $log) = reviewRunStampFixture($installation, $fqdnConfig, ['--check-install'], $helperSource);
+reviewCheck($status === 0 && strpos($log, '[OK] SMTP greeting: backup.example.com') !== false, 'Installation check omitted the configured FQDN');
+$detectedConfig = $emailConfig;
+list($status, $log) = reviewRunStampFixture(
+    $installation,
+    $detectedConfig,
+    ['--check-install'],
+    reviewDnsFixtureSource($originalHelpers, $matchingDns)
+);
+reviewCheck(
+    $status === 0 && strpos($log, '[OK] SMTP greeting: backup.example.com') !== false
+    && strpos($log, '(forward/reverse DNS match)') !== false
+    && strpos($log, 'WARNING:') === false,
+    'Installation check did not resolve matching forward/reverse DNS'
+);
+list($status, $log) = reviewRunStampFixture($installation, $detectedConfig, ['--check-install'], $helperSource);
+reviewCheck(
+    $status === 0 && strpos($log, 'WARNING: Cannot verify the SMTP greeting FQDN') !== false,
+    'Installation DNS failure did not warn and continue'
+);
+list($status, $log) = reviewRunStampFixture(
+    $installation,
+    $detectedConfig,
+    ['--dry-run'],
+    reviewDnsFixtureSource($originalHelpers, ['forbid' => true])
+);
+reviewCheck($status === 0 && strpos($log, 'Unexpected DNS resolution') === false, 'Ordinary dry run performed DNS resolution');
+$fqdnConfig['email']['smtp']['ehlo_hostname'] = "backup.example.com\r\nEHLO injected";
+foreach ([['--check-install'], ['--dry-run', '--test-email']] as $arguments) {
+    list($status, $log) = reviewRunStampFixture($installation, $fqdnConfig, $arguments, $smtpHelpers);
+    reviewCheck(
+        $status === 1 && strpos($log, 'email.smtp.ehlo_hostname') !== false
+        && strpos($log, 'Fixture SMTP failure') === false,
+        'Invalid SMTP FQDN reached notification or passed preflight'
+    );
+    reviewStampUnchanged($stampPath, $previousStamp, $previousTime);
+}
 list($status, $log) = reviewRunStampFixture($installation, $emailConfig, ['--dry-run', '--test-email'], $smtpHelpers);
 reviewCheck($status === 1 && strpos($log, 'Fixture SMTP failure') !== false, 'Dry-run test email was not attempted: ' . $log);
 reviewStampUnchanged($stampPath, $previousStamp, $previousTime);

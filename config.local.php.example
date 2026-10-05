@@ -129,11 +129,12 @@ return [
     // 'email' => [
     //     'enabled' => true,
     //     'smtp'    => [
-    //         'host'       => 'smtp.example.com',
-    //         'port'       => 587,
-    //         'user'       => 'notify@example.com',
-    //         'password'   => 'smtp-password',
-    //         'encryption' => 'tls',   // 'tls', 'ssl', or '' for none
+    //         'host'          => 'smtp.example.com',
+    //         'port'          => 587,
+    //         'user'          => 'notify@example.com',
+    //         'password'      => 'smtp-password',
+    //         'encryption'    => 'tls',   // 'tls', 'ssl', or '' for none
+    //         'ehlo_hostname' => 'backup.example.com', // Optional FQDN override; empty detects via DNS
     //     ],
     //     'from'    => 'notify@example.com',
     //     'to'      => 'admin@example.com',
